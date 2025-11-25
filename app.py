@@ -52,7 +52,8 @@ JSON_SCHEMA = {
             "description": "The cardholder's blood type (သွေးအမျိုးအစား), including the Rh factor, if available."
         }
     },
-    "required": ["NRC_Number", "Name", "Fathers_Name", "Date_of_Birth", "Height", "Religion", "Blood_Type"]
+    # --- CHANGE: Only core, easily found fields are now REQUIRED ---
+    "required": ["NRC_Number", "Name", "Fathers_Name", "Date_of_Birth"] 
 }
 
 # Define the system instruction to guide the model's behavior and role
@@ -138,7 +139,7 @@ def extract_nrc_data(image_bytes: bytes):
 def main():
     st.set_page_config(page_title="NRC Document Data Extractor", layout="centered")
 
-    st.title("🇲🇲 NRC Document Data Extractor")
+    st.title("MM NRC Document Data Extractor")
     st.markdown("Upload a photo or scan of a Myanmar National Registration Card (NRC) to extract key details using the Gemini AI model.")
 
     # File Uploader component
