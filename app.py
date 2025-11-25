@@ -60,18 +60,19 @@ JSON_SCHEMA = {
 SYSTEM_INSTRUCTION = (
     "You are an expert Optical Character Recognition (OCR) and Intelligent Document "
     "Processing (IDP) system specialized in reading Myanmar National Registration Card (NRC) documents. "
-    "Your task is to accurately extract the required fields from the image, specifically handling the Burmese script. "
+    "Your primary task is to accurately extract the required fields, prioritizing the precise recognition "
+    "of *handwritten* Burmese script, even when the image quality is imperfect or the script is ambiguous. "
     "Output the results ONLY as a JSON object conforming to the provided schema."
 )
 
 # --- Function to call the Gemini API ---
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def extract_nrc_data(image_bytes: bytes):
     """
     Calls the Gemini API to extract structured data from the image bytes.
     """
     if not API_KEY:
-        st.error("API Key is missing. Please configure 'GEMINI_API_KEY' in your deployment secrets or environment variables.")
+        st.error("API Key is missing. Please configure 'GEMINI_API_KEY' in your environment.")
         return None
         
     st.info("Sending document to Gemini API for extraction. This may take a moment...")
@@ -88,7 +89,7 @@ def extract_nrc_data(image_bytes: bytes):
         "6) Religion (ကိုးကွယ်သည့်ဘာသာ), and 7) Blood Type (သွေးအမျိုးအစား). "
         "Return the output as a single JSON object."
     )
-
+    
     payload = {
         "contents": [
             {
@@ -105,29 +106,35 @@ def extract_nrc_data(image_bytes: bytes):
             "responseSchema": JSON_SCHEMA
         }
     }
-
+    
     # 3. Make the API request
     try:
-        response = requests.post(API_URL, headers={'Content-Type': 'application/json'}, json=payload)
+        response = requests.post(
+            f"{API_URL}?key={API_KEY}", 
+            headers={'Content-Type': 'application/json'}, 
+            json=payload
+        )
         response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
         
         # 4. Process the response
         result = response.json()
         
         # Extract the JSON string from the response
+        # Navigate the potentially complex response structure
         json_string = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text')
         
         if json_string:
             # Parse the JSON string into a Python dictionary
             return json.loads(json_string)
         else:
-            error_message = result.get('candidates', [{}])[0].get('safetyRatings', 'No content generated. Check safety settings or the prompt.')
-            st.error(f"Error: Could not extract structured JSON. API response details: {error_message}")
+            # Try to get detailed error info if no content was generated
+            error_detail = result.get('candidates', [{}])[0].get('finishReason', 'No content generated.')
+            st.error(f"Error: Could not extract structured JSON. Finish Reason: {error_detail}")
             st.code(result, language='json')
             return None
 
     except requests.exceptions.HTTPError as e:
-        st.error(f"HTTP Error during API call: {e}. Ensure your API key is correct and you have sufficient quota.")
+        st.error(f"HTTP Error during API call: {e}. Check your API key and quota.")
         st.code(response.text, language='json')
         return None
     except Exception as e:
@@ -140,7 +147,7 @@ def main():
     st.set_page_config(page_title="NRC Document Data Extractor", layout="centered")
 
     st.title("MM NRC Document Data Extractor")
-    st.markdown("Upload a photo or scan of a Myanmar National Registration Card (NRC) to extract key details using the Gemini AI model.")
+    st.markdown("Upload a photo or scan of a Myanmar National Registration Card (NRC) to extract key details using the **Gemini AI model** with structured JSON output. **Tip:** For best results with handwritten Burmese, ensure the uploaded image is high-resolution and clearly focused.")
 
     # File Uploader component
     uploaded_file = st.file_uploader(
@@ -156,7 +163,9 @@ def main():
 
         # Button to trigger extraction
         if st.button("Extract Data", type="primary"):
-            st.session_state['extracted_data'] = None # Clear previous data
+            # Clear previous data to ensure fresh extraction
+            if 'extracted_data' in st.session_state:
+                del st.session_state['extracted_data']
 
             with st.spinner("Analyzing document and extracting data..."):
                 extracted_data = extract_nrc_data(image_bytes)
