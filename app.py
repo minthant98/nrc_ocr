@@ -110,7 +110,8 @@ def extract_nrc_data(image_bytes: bytes):
     # 3. Make the API request
     try:
         response = requests.post(
-            f"{API_URL}?key={API_KEY}", 
+            API_URL, 
+            params={'key': API_KEY}, 
             headers={'Content-Type': 'application/json'}, 
             json=payload
         )
