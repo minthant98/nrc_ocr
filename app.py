@@ -38,9 +38,21 @@ JSON_SCHEMA = {
         "Date_of_Birth": {
             "type": "STRING",
             "description": "The cardholder's date of birth (မွေးသက္ကရာဇ်), in the original Burmese script (e.g., date, month, year)."
+        },
+        "Height": {
+            "type": "STRING",
+            "description": "The cardholder's height (အရပ်), in the original Burmese script and units."
+        },
+        "Religion": {
+            "type": "STRING",
+            "description": "The cardholder's religion (ကိုးကွယ်သည့်ဘာသာ), in the original Burmese script."
+        },
+        "Blood_Type": {
+            "type": "STRING",
+            "description": "The cardholder's blood type (သွေးအမျိုးအစား), including the Rh factor, if available."
         }
     },
-    "required": ["NRC_Number", "Name", "Fathers_Name", "Date_of_Birth"]
+    "required": ["NRC_Number", "Name", "Fathers_Name", "Date_of_Birth", "Height", "Religion", "Blood_Type"]
 }
 
 # Define the system instruction to guide the model's behavior and role
@@ -71,7 +83,8 @@ def extract_nrc_data(image_bytes: bytes):
     user_query = (
         "Analyze the provided Myanmar NRC document image. Locate and extract the following fields "
         "and their values: 1) The full NRC number (အမှတ်), 2) The cardholder's Name (အမည်), "
-        "3) The Father's Name (အဘအမည်), and 4) The Date of Birth (မွေးသက္ကရာဇ်). "
+        "3) The Father's Name (အဘအမည်), 4) The Date of Birth (မွေးသက္ကရာဇ်), 5) Height (အရပ်), "
+        "6) Religion (ကိုးကွယ်သည့်ဘာသာ), and 7) Blood Type (သွေးအမျိုးအစား). "
         "Return the output as a single JSON object."
     )
 
@@ -161,7 +174,10 @@ def main():
                 ("NRC Number (အမှတ်)", data.get("NRC_Number", "N/A")),
                 ("Name (အမည်)", data.get("Name", "N/A")),
                 ("Father's Name (အဘအမည်)", data.get("Fathers_Name", "N/A")),
-                ("Date of Birth (မွေးသက္ကရာဇ်)", data.get("Date_of_Birth", "N/A"))
+                ("Date of Birth (မွေးသက္ကရာဇ်)", data.get("Date_of_Birth", "N/A")),
+                ("Height (အရပ်)", data.get("Height", "N/A")),
+                ("Religion (ကိုးကွယ်သည့်ဘာသာ)", data.get("Religion", "N/A")),
+                ("Blood Type (သွေးအမျိုးအစား)", data.get("Blood_Type", "N/A"))
             ]
             
             st.table(display_data)
