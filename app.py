@@ -23,21 +23,6 @@ except KeyError:
 # The URL for the Gemini API model endpoint
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
 
-# --- Hardcoded Normalized Bounding Boxes (0-1000) ---
-# Coordinates are estimated based on a typical NRC layout and assume a CORRECTLY ORIENTED image.
-NRC_BOUNDING_BOXES = {
-    # Normalized coordinates [xMin, yMin, xMax, yMax] based on a 1000x1000 grid
-    "NRC_State_Code": [190, 200, 290, 260],
-    "NRC_Number": [300, 200, 950, 290],
-    "Name": [280, 360, 950, 440],            # Handwritten Field
-    "Fathers_Name": [280, 450, 950, 530],    # Handwritten Field
-    "Date_of_Birth": [280, 530, 700, 610],   # Handwritten Field
-    "Height": [280, 610, 550, 690],
-    "Religion": [280, 690, 700, 770],
-    "Blood_Type": [280, 770, 550, 850],
-}
-
-
 # --- Data Mapping and Schemas (Unchanged) ---
 JSON_SCHEMA = {
     "type": "OBJECT",
@@ -82,18 +67,21 @@ JSON_SCHEMA = {
     "required": ["Overall_Confidence_Score", "NRC_State_Code", "NRC_Number", "Name", "Fathers_Name", "Date_of_Birth"] 
 }
 
+# --- SYSTEM INSTRUCTION (Slightly improved to be more direct) ---
 SYSTEM_INSTRUCTION = (
     "You are an expert Optical Character Recognition (OCR) and Intelligent Document "
     "Processing (IDP) system specialized in reading Myanmar National Registration Card (NRC) documents. "
     "Your primary task is to **meticulously and accurately** extract the required fields, prioritizing the **precise recognition "
-    "of handwritten Burmese script**, even when the image quality is imperfect. "
+    "of handwritten Burmese script** by scanning the entire document contextually. "
     "For handwritten fields, you must ignore the underlying pre-printed text/patterns and focus solely on the script written with a pen. "
     "All numerical values (like the State Code) must be output as standard Latin digits (0-9). "
     "Crucially, you must provide an Overall_Confidence_Score (0.0 to 1.0) based on the image quality and legibility of the handwritten fields. "
     "Output the results ONLY as a JSON object conforming to the provided schema."
 )
 
-# --- NEW: Rotation Correction Function ---
+
+# --- Image Pre-Processing Pipeline (Retained from V4 for robustness) ---
+
 def rotate_image_from_exif(img: Image.Image) -> Image.Image:
     """
     Reads EXIF data to automatically correct image orientation.
@@ -101,23 +89,19 @@ def rotate_image_from_exif(img: Image.Image) -> Image.Image:
     try:
         exif = img._getexif()
         if exif is not None:
-            # Find the Orientation tag ID (usually 274)
             orientation_tag = next((k for k, v in ExifTags.TAGS.items() if v == 'Orientation'), None)
-            
             orientation = exif.get(orientation_tag)
             
-            # Apply corresponding rotation
             if orientation == 3:
                 img = img.rotate(180, expand=True)
                 st.info("Auto-rotated image 180° based on EXIF data.")
             elif orientation == 6:
-                img = img.rotate(-90, expand=True) # Rotate 90 degrees CCW
+                img = img.rotate(-90, expand=True)
                 st.info("Auto-rotated image -90° based on EXIF data.")
             elif orientation == 8:
-                img = img.rotate(90, expand=True) # Rotate 90 degrees CW
+                img = img.rotate(90, expand=True)
                 st.info("Auto-rotated image 90° based on EXIF data.")
     except Exception:
-        # Ignore if EXIF data is missing or corrupted
         pass
     
     return img
@@ -128,18 +112,14 @@ def image_to_bytes(img: Image.Image) -> bytes:
     img.save(buffer, format="JPEG", quality=90)
     return buffer.getvalue()
 
-
-# --- Image Pre-Processing Pipeline ---
-
 def process_image(image_bytes: bytes, rotation_angle: int = 0) -> bytes:
     """
     Applies auto-rotation, manual rotation, sharpening, and contrast enhancement.
     """
     try:
-        # Load the image
         img = Image.open(io.BytesIO(image_bytes))
 
-        # 1. Auto-Rotate from EXIF data (Done first to set correct baseline)
+        # 1. Auto-Rotate from EXIF data
         img = rotate_image_from_exif(img)
         
         # 2. Apply Manual Rotation (if triggered by user buttons)
@@ -166,14 +146,12 @@ def process_image(image_bytes: bytes, rotation_angle: int = 0) -> bytes:
         st.warning(f"Image processing pipeline failed: {e}. Using original image bytes.")
         return image_bytes
 
-# --- Validation and Utility Functions (Unchanged) ---
-
+# --- Validation and Utility Functions ---
 def is_valid_date(burmese_date_str: str) -> bool:
     """Tries to parse a date from the Burmese string and validates it."""
     today = date.today()
     import re
     year_match = re.search(r'(\d{4})', burmese_date_str)
-    
     if year_match:
         try:
             year = int(year_match.group(1))
@@ -188,7 +166,6 @@ def validate_nrc_data(data: Dict[str, Any]) -> List[str]:
     """Applies the specified business rules to the extracted NRC data."""
     warnings = []
     
-    # 1. NRC State/Division Code should be 1 to 14
     nrc_state_code = str(data.get('NRC_State_Code', '')).strip()
     if nrc_state_code:
         try:
@@ -199,15 +176,12 @@ def validate_nrc_data(data: Dict[str, Any]) -> List[str]:
             warnings.append(f"State Code '{nrc_state_code}' is not a valid number (1-14).")
     else: warnings.append("NRC State Code is missing.")
         
-    # 2. Citizen Number should always include the pattern (X)######
     nrc_number_full = data.get('NRC_Number', '').strip()
     import re
-    # Simplified regex check for a classification and 6 digits
     citizen_number_match = re.search(r'\([CNA]\)\d{6}$', nrc_number_full)
     if not citizen_number_match:
         warnings.append(f"NRC Number '{nrc_number_full}' may be missing the classification code or the 6-digit citizen number.")
         
-    # 3. Date of birth should be valid date (checks 4-digit year)
     dob_burmese = data.get('Date_of_Birth', '').strip()
     if dob_burmese and not is_valid_date(dob_burmese):
         warnings.append(f"Date of Birth '{dob_burmese}' appears invalid (e.g., future date or over 200 years old).")
@@ -217,13 +191,11 @@ def validate_nrc_data(data: Dict[str, Any]) -> List[str]:
 def calculate_accuracy_score(original_data: Dict[str, Any], corrected_data: Dict[str, Any]) -> float:
     """
     Calculates a field-level string similarity score between the model's output and the human-corrected output.
-    Uses sequence matcher ratio (a measure of string similarity).
     """
     fields_to_compare = [
         "NRC_State_Code", "NRC_Number", "Name", "Fathers_Name", 
         "Date_of_Birth", "Height", "Religion", "Blood_Type"
     ]
-    
     total_score = 0.0
     
     for field in fields_to_compare:
@@ -234,51 +206,57 @@ def calculate_accuracy_score(original_data: Dict[str, Any], corrected_data: Dict
             similarity_ratio = difflib.SequenceMatcher(None, original_value, corrected_value).ratio()
             total_score += similarity_ratio
         else:
-            total_score += 1.0 # Treat empty/empty as 100% accurate for that optional field
+            total_score += 1.0 
             
     accuracy = total_score / len(fields_to_compare)
     return accuracy
 
-# --- Function to call the Gemini API ---
+def update_data_from_fields(fields_data: Dict[str, str]):
+    """
+    Updates the session state with human-corrected data from the form, re-validates, 
+    and recalculates the accuracy score.
+    """
+    # 1. Update the extracted_data in session state with corrected fields
+    # Use .copy() to ensure we are modifying a mutable copy
+    updated_data = st.session_state['extracted_data'].copy() 
+    for key, value in fields_data.items():
+        updated_data[key] = value
+
+    st.session_state['extracted_data'] = updated_data
+    
+    # 2. Re-validate the corrected data
+    updated_data['validation_warnings'] = validate_nrc_data(updated_data)
+
+    # 3. Recalculate accuracy against the original model output
+    original_data = st.session_state['original_data']
+    accuracy = calculate_accuracy_score(original_data, updated_data)
+    st.session_state['accuracy_score'] = accuracy
+    
+    st.success("Data successfully updated, re-validated, and accuracy score recalculated.")
+
+# --- Function to call the Gemini API (Simplified Prompt) ---
 @st.cache_data(show_spinner=False)
 def extract_nrc_data(enhanced_image_bytes: bytes) -> Optional[Dict[str, Any]]:
     """
     Calls the Gemini API to extract structured data from the ENHANCED image bytes,
-    using segmented extraction based on normalized coordinates.
+    relying on holistic understanding of the document structure (V3 prompt style).
     """
     if not API_KEY or not API_URL:
         st.error("API Key or URL is missing. Please configure them.")
         return None
         
-    st.info("Sending **segmented, oriented, and enhanced** document to Gemini API for precise extraction. This may take a moment...")
+    st.info("Sending **oriented and enhanced** document to Gemini API for extraction. The model will use structural context to find the fields.")
     
     base64_image = base64.b64encode(enhanced_image_bytes).decode('utf-8')
     mime_type = "image/jpeg" 
     
-    # --- CONSTRUCT SEGMENTED USER QUERY ---
-    prompt_segments = [
-        "Analyze the provided Myanmar NRC document image. Extract data for the fields listed below.",
-        "The coordinates are normalized to a 1000x1000 grid [xMin, yMin, xMax, yMax].",
-        "For each field, only read the text within the specified bounding box. Ignore all other content and background.\n"
-    ]
-    
-    # Add a specific instruction for each field using the bounding box
-    for field_name, coords in NRC_BOUNDING_BOXES.items():
-        # Convert 0-1000 coordinates to 0.0-1.0 format for better AI interpretation
-        normalized_coords = [c / 1000.0 for c in coords]
-        
-        instruction = f"- Field: **{field_name}** at: **[{normalized_coords[0]:.3f}, {normalized_coords[1]:.3f}, {normalized_coords[2]:.3f}, {normalized_coords[3]:.3f}]**."
-        
-        if field_name in ["Name", "Fathers_Name", "Date_of_Birth"]:
-            instruction += " **MUST be extracted from handwritten Burmese script.**"
-        elif field_name == "NRC_State_Code":
-            instruction += " Output as a standard Latin digit (1-14)."
-        
-        prompt_segments.append(instruction)
-
-    # Final query assembly
-    user_query = "\n".join(prompt_segments)
-    user_query += "\n\nReturn the output as a single JSON object."
+    # --- CONSTRUCT HOLISTIC USER QUERY (V3 style) ---
+    user_query = (
+        "Analyze the provided Myanmar NRC document image. Extract the values for the following fields. "
+        "Pay special attention to the handwritten Burmese text, ensuring the output for NRC_number, Name, Father's Name, and Date of Birth "
+        "is copied exactly as written in the original Burmese script from the document. "
+        "Return the output as a single JSON object."
+    )
     
     payload = {
         "contents": [
@@ -307,69 +285,23 @@ def extract_nrc_data(enhanced_image_bytes: bytes) -> Optional[Dict[str, Any]]:
         response.raise_for_status()
         result = response.json()
         
-        # Safely extract the JSON string
         json_string = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text')
         
         if json_string:
             extracted_data = json.loads(json_string)
-            
             st.session_state['original_data'] = extracted_data.copy()
-            
-            # Run Validation
             warnings = validate_nrc_data(extracted_data)
             extracted_data['validation_warnings'] = warnings
-            
             return extracted_data
         else:
             error_detail = result.get('candidates', [{}])[0].get('finishReason', 'No content generated.')
             st.error(f"Error: Could not extract structured JSON. Finish Reason: {error_detail}")
-            st.code(result, language='json')
             return None
 
     except Exception as e:
         st.error(f"An unexpected error occurred: {e}")
         return None
 
-
-# --- Custom Logic to Handle Text Input Updates (Unchanged) ---
-
-def update_data_from_fields(fields_data: Dict[str, str]):
-    """
-    Gathers data from Streamlit text inputs, re-validates, calculates accuracy, and updates the state.
-    """
-    try:
-        # 1. Construct the updated data structure
-        updated_data = {
-            "Overall_Confidence_Score": st.session_state['extracted_data'].get('Overall_Confidence_Score', 0.0),
-            "NRC_State_Code": fields_data.get('NRC_State_Code', '').strip(),
-            "NRC_Number": fields_data.get('NRC_Number', '').strip(),
-            "Name": fields_data.get('Name', '').strip(),
-            "Fathers_Name": fields_data.get('Fathers_Name', '').strip(),
-            "Date_of_Birth": fields_data.get('Date_of_Birth', '').strip(),
-            "Height": fields_data.get('Height', '').strip(),
-            "Religion": fields_data.get('Religion', '').strip(),
-            "Blood_Type": fields_data.get('Blood_Type', '').strip(),
-        }
-
-        # Check for REQUIRED fields after cleaning
-        required_fields_check = all(updated_data.get(field) for field in JSON_SCHEMA['required'] if field != 'Overall_Confidence_Score')
-        if not required_fields_check:
-             st.error("Error: All required fields must have a value.")
-             return
-        
-        # 2. Re-validate the human-corrected data
-        updated_data['validation_warnings'] = validate_nrc_data(updated_data)
-
-        # 3. Calculate Accuracy Score
-        original_data = st.session_state.get('original_data', {})
-        accuracy = calculate_accuracy_score(original_data, updated_data)
-        st.session_state['accuracy_score'] = accuracy
-        
-        # 4. Update session state
-        st.session_state['extracted_data'] = updated_data
-        st.success(f"✅ Data successfully updated and re-validated. Accuracy Score: {accuracy * 100:.2f}%")
-    except Exception as e:
-        st.error(f"An unexpected error occurred during update: {e}")
 
 # --- Rotation Action Functions ---
 def rotate_uploaded_image(angle: int):
@@ -405,11 +337,11 @@ def rotate_uploaded_image(angle: int):
 # --- Streamlit App UI ---
 
 def main():
-    st.set_page_config(page_title="NRC Document Data Extractor V4", layout="centered")
+    st.set_page_config(page_title="NRC Document Data Extractor V5", layout="centered")
 
-    st.title("🇲🇲 NRC Document Data Extractor V4")
-    st.subheader("Step 3: Robustness (Auto-Rotation, Segmentation, and Enhancement)")
-    st.markdown("This version automatically corrects the image orientation via **EXIF data** to ensure the bounding boxes are accurate. Use the rotation buttons if the image is still crooked.")
+    st.title("🇲🇲 NRC Document Data Extractor V5")
+    st.subheader("Step 3: Optimal Hybrid Extraction (Orientation + Enhancement + Context)")
+    st.markdown("We are now using the most accurate approach: **Auto-Orientation** and **Image Enhancement** (V4's best features), combined with the **Holistic Contextual Prompting** (V3's best feature) for the final extraction.")
 
     # Initialize session state for data storage
     if 'extracted_data' not in st.session_state: st.session_state['extracted_data'] = None
@@ -425,24 +357,22 @@ def main():
 
     uploaded_file = None
     camera_image = None
-    selected_source = None
-
-    with tab1:
-        uploaded_file = st.file_uploader("Upload NRC Image (PNG, JPG)", type=["png", "jpg", "jpeg"])
-    with tab2:
-        camera_image = st.camera_input("Snap a photo of the NRC Document")
     
-    # Determine the latest uploaded source
-    if uploaded_file is not None:
-        selected_source = uploaded_file
-        # Initialize or update session state with new upload
+    # Process file/camera input and store bytes in session state
+    with tab1:
+        tab1.session_state['file_uploader'] = st.file_uploader("Upload Myanmar NRC Image", type=["png", "jpg", "jpeg"])
+    with tab2:
+        tab2.session_state['camera_input'] = st.camera_input("Take a Photo of NRC")
+
+
+    if tab1.session_state['file_uploader'] and tab1.session_state['file_uploader'] is not None:
+        uploaded_file = tab1.session_state['file_uploader']
         if st.session_state.get('uploaded_file_name') != uploaded_file.name:
             st.session_state['uploaded_file_bytes'] = uploaded_file.getvalue()
             st.session_state['uploaded_file_name'] = uploaded_file.name
             st.session_state['current_image_bytes'] = uploaded_file.getvalue()
-    elif camera_image is not None:
-        selected_source = camera_image
-        # Always treat camera image as a new input
+    elif tab2.session_state['camera_input'] and tab2.session_state['camera_input'] is not None:
+        camera_image = tab2.session_state['camera_input']
         st.session_state['uploaded_file_bytes'] = camera_image.getvalue()
         st.session_state['current_image_bytes'] = camera_image.getvalue()
         
@@ -460,17 +390,15 @@ def main():
         with col_rot3:
             st.button("Rotate 180°", on_click=rotate_uploaded_image, args=(180,), help="Rotate 180°")
         with col_rot4:
-            st.info("The image below shows the *current* orientation.")
+            st.info("The image below shows the *current* orientation (after auto-EXIF correction).")
 
         # --- Image Display Tabs ---
         img_tab1, img_tab2 = st.tabs(["Current Oriented Image", "AI Processed Image (Enhanced)"])
         
         with img_tab1:
-            # Display the current, oriented but unenhanced image
-            st.image(image_bytes_to_display, caption='Current Input Document (Auto-rotated via EXIF if metadata was present)', use_column_width=True)
+            st.image(image_bytes_to_display, caption='Current Input Document', use_column_width=True)
 
         with img_tab2:
-            # Display the final, enhanced image that goes to the AI
             if 'enhanced_image_bytes' in st.session_state and st.session_state['enhanced_image_bytes'] is not None:
                 st.image(st.session_state['enhanced_image_bytes'], caption='Sharpened & Contrast Enhanced Image Sent to AI', use_column_width=True)
             else:
@@ -479,15 +407,14 @@ def main():
         st.divider()
 
         # Button to trigger extraction
-        if st.button("1. Extract & Validate Data (Using Segmented Prompt)", type="primary"):
-            # The extraction uses the currently oriented image bytes
+        if st.button("1. Extract & Validate Data", type="primary"):
             
-            # 1. Clear previous results (except for the current image bytes)
+            # 1. Clear previous results
             st.session_state['extracted_data'] = None 
             st.session_state['accuracy_score'] = None
             
-            with st.spinner("Processing image (Auto-Rotation, Enhancement) and calling Gemini..."):
-                # 2. Run the image through the pipeline for enhancement
+            with st.spinner("Processing image (Auto-Orientation, Enhancement) and calling Gemini..."):
+                # 2. Run the image through the pipeline for enhancement and orientation
                 enhanced_bytes = process_image(st.session_state['uploaded_file_bytes'])
                 st.session_state['enhanced_image_bytes'] = enhanced_bytes
                 
