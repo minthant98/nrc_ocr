@@ -3,10 +3,11 @@ import requests
 import base64
 import json
 import io
-import os # Required for checking environment variables
-from datetime import datetime, date
-from typing import Optional, Dict, Any, List
-import difflib # For string comparison
+import os 
+from typing import Dict, Any, List, Optional
+import difflib 
+from datetime import date
+from PIL import Image, ImageEnhance # Import PIL for image enhancement
 
 # --- Configuration for Gemini API ---
 # The code now loads the API key securely using Streamlit's secrets management.
@@ -22,35 +23,34 @@ except KeyError:
 # The URL for the Gemini API model endpoint
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
 
-# --- Data Mapping and Schemas ---
-
-# --- Data Mapping and Schemas (Unchanged) ---
+# --- Data Mapping and Schemas (REFINED) ---
+# Emphasizing required output format for the model
 JSON_SCHEMA = {
     "type": "OBJECT",
     "properties": {
         "Overall_Confidence_Score": {
             "type": "NUMBER",
-            "description": "A score from 0.0 to 1.0 (or 0 to 100) indicating the model's certainty in the entire extraction, especially for handwritten Burmese fields. Use 0.0 to 1.0 format."
+            "description": "A score from 0.0 to 1.0 indicating the model's certainty in the entire extraction, especially for handwritten Burmese fields. Use 0.0 to 1.0 format."
         },
         "NRC_State_Code": {
             "type": "STRING",
-            "description": "The State/Division code (the first 1-2 digits/characters of the NRC), e.g., '1', '7', '12', translated into standard characters."
+            "description": "The State/Division code (the first 1-2 digits/characters of the NRC), e.g., '1', '7', '12', translated into **standard Latin digits (1-14)**."
         },
         "NRC_Number": {
             "type": "STRING",
-            "description": "The complete NRC number, including codes and the 6-digit number, translated into standard characters if possible."
+            "description": "The complete NRC number, including codes and the 6-digit number, following the pattern: X/XXX(Y)######. Must use standard characters."
         },
         "Name": {
             "type": "STRING",
-            "description": "The cardholder's name (အမည်), in the original Burmese script."
+            "description": "The cardholder's name (အမည်), extracted **precisely** in the original handwritten Burmese script."
         },
         "Fathers_Name": {
             "type": "STRING",
-            "description": "The father's name (အဘအမည်), in the original Burmese script."
+            "description": "The father's name (အဘအမည်), extracted **precisely** in the original handwritten Burmese script."
         },
         "Date_of_Birth": {
             "type": "STRING",
-            "description": "The cardholder's date of birth (မွေးသက္ကရာဇ်), in the original Burmese script (e.g., date, month, year)."
+            "description": "The cardholder's date of birth (မွေးသက္ကရာဇ်), extracted **precisely** in the original handwritten Burmese script (e.g., date, month, year, including original Burmese numbers/characters)."
         },
         "Height": {
             "type": "STRING",
@@ -71,12 +71,40 @@ JSON_SCHEMA = {
 SYSTEM_INSTRUCTION = (
     "You are an expert Optical Character Recognition (OCR) and Intelligent Document "
     "Processing (IDP) system specialized in reading Myanmar National Registration Card (NRC) documents. "
-    "Your primary task is to **meticulously and accurately** extract the required fields, prioritizing the precise recognition "
-    "of *handwritten* Burmese script, even when the image quality is imperfect or the script is ambiguous. "
-    "The NRC_State_Code must be the first numerical part of the NRC number, translated into standard digits (1-14). "
+    "Your primary task is to **meticulously and accurately** extract the required fields, prioritizing the **precise recognition "
+    "of handwritten Burmese script**, even when the image quality is imperfect. "
+    "For handwritten fields, you must ignore the underlying pre-printed text/patterns and focus solely on the script written with a pen. "
+    "All numerical values (like the State Code) must be output as standard Latin digits (0-9). "
     "Crucially, you must provide an Overall_Confidence_Score (0.0 to 1.0) based on the image quality and legibility of the handwritten fields. "
     "Output the results ONLY as a JSON object conforming to the provided schema."
 )
+
+# --- NEW: Image Enhancement Function ---
+
+def enhance_image(image_bytes: bytes) -> bytes:
+    """
+    Applies sharpening and contrast enhancement to the image for better OCR reading.
+    """
+    try:
+        # Load the image
+        img = Image.open(io.BytesIO(image_bytes))
+        
+        # 1. Sharpen the image (Factor of 2.0 is usually aggressive but good for OCR)
+        sharpen_filter = ImageEnhance.Sharpness(img)
+        img_sharpened = sharpen_filter.enhance(2.0)
+        
+        # 2. Increase contrast (Factor of 1.5)
+        contrast_filter = ImageEnhance.Contrast(img_sharpened)
+        img_final = contrast_filter.enhance(1.5)
+        
+        # Save the enhanced image back to bytes (use JPEG for efficiency)
+        buffer = io.BytesIO()
+        img_final.save(buffer, format="JPEG", quality=90) 
+        return buffer.getvalue()
+    except Exception as e:
+        # Fallback to original image if enhancement fails
+        st.warning(f"Image enhancement failed: {e}. Using original image.")
+        return image_bytes
 
 # --- Validation and Utility Functions (Unchanged) ---
 
@@ -110,32 +138,27 @@ def validate_nrc_data(data: Dict[str, Any]) -> List[str]:
         except ValueError:
             warnings.append(f"State Code '{nrc_state_code}' is not a valid number (1-14).")
     else: warnings.append("NRC State Code is missing.")
-         
-    # 2. Citizen Number should always be six digits
+        
+    # 2. Citizen Number should always include the pattern (X)######
     nrc_number_full = data.get('NRC_Number', '').strip()
     import re
+    # Simplified regex check for a classification and 6 digits
     citizen_number_match = re.search(r'\([CNA]\)\d{6}$', nrc_number_full)
     if not citizen_number_match:
         warnings.append(f"NRC Number '{nrc_number_full}' may be missing the classification code or the 6-digit citizen number.")
         
-    # 3. Date of birth should be valid date
+    # 3. Date of birth should be valid date (checks 4-digit year)
     dob_burmese = data.get('Date_of_Birth', '').strip()
     if dob_burmese and not is_valid_date(dob_burmese):
         warnings.append(f"Date of Birth '{dob_burmese}' appears invalid (e.g., future date or over 200 years old).")
         
     return warnings
 
-# --- NEW: Accuracy Calculation Function ---
-
 def calculate_accuracy_score(original_data: Dict[str, Any], corrected_data: Dict[str, Any]) -> float:
     """
     Calculates a field-level string similarity score between the model's output and the human-corrected output.
-    
-    Uses sequence matcher ratio (a measure of string similarity based on matching characters).
-    A score of 1.0 (100%) means the model's output was exactly the same as the corrected output.
+    Uses sequence matcher ratio (a measure of string similarity).
     """
-    
-    # Fields to compare (excluding metadata and non-string fields like the confidence score itself)
     fields_to_compare = [
         "NRC_State_Code", "NRC_Number", "Name", "Fathers_Name", 
         "Date_of_Birth", "Height", "Religion", "Blood_Type"
@@ -147,40 +170,40 @@ def calculate_accuracy_score(original_data: Dict[str, Any], corrected_data: Dict
         original_value = str(original_data.get(field, "")).strip()
         corrected_value = str(corrected_data.get(field, "")).strip()
         
-        # We only compare if both strings have content
         if original_value or corrected_value:
-            # difflib.SequenceMatcher is robust for string similarity
             similarity_ratio = difflib.SequenceMatcher(None, original_value, corrected_value).ratio()
             total_score += similarity_ratio
         else:
-            # If both are empty (e.g., Blood_Type wasn't extracted or corrected), treat as 100% accurate for that field (no error)
-            total_score += 1.0
+            total_score += 1.0 # Treat empty/empty as 100% accurate for that optional field
             
-    # Calculate the average score across all fields
     accuracy = total_score / len(fields_to_compare)
-    
     return accuracy
 
-# --- Function to call the Gemini API ---
+# --- Function to call the Gemini API (MODIFIED) ---
 @st.cache_data(show_spinner=False)
 def extract_nrc_data(image_bytes: bytes) -> Optional[Dict[str, Any]]:
     """
-    Calls the Gemini API to extract structured data from the image bytes, validates it, and stores the original.
+    Calls the Gemini API to extract structured data from the ENHANCED image bytes.
     """
     if not API_KEY or not API_URL:
         st.error("API Key or URL is missing. Please configure them.")
         return None
         
-    st.info("Sending document to Gemini API for extraction. This may take a moment...")
+    # --- NEW: Image Enhancement Step ---
+    enhanced_image_bytes = enhance_image(image_bytes)
     
-    # ... (API call payload construction remains the same) ...
-    base64_image = base64.b64encode(image_bytes).decode('utf-8')
-    mime_type = "image/png" 
+    st.info("Sending **enhanced** document to Gemini API for extraction. This may take a moment...")
+    
+    base64_image = base64.b64encode(enhanced_image_bytes).decode('utf-8')
+    mime_type = "image/jpeg" # Use JPEG as that is the format output by the enhancement function
+    
+    # --- REFINED USER QUERY ---
     user_query = (
-        "Analyze the provided Myanmar NRC document image. Locate and extract the following fields "
-        "and their values: 1) The **Overall Confidence Score** (0.0 to 1.0), 2) The **State Code** (first numerical part of the NRC), "
-        "3) The **full NRC number** (အမှတ်), 4) The cardholder's Name (အမည်), 5) The Father's Name (အဘအမည်), "
-        "6) The Date of Birth (မွေးသက္ကရာဇ်), 7) Height (အရပ်), 8) Religion (ကိုးကွယ်သည့်ဘာသာ), and 9) Blood Type (သွေးအမျိုးအစား). "
+        "Analyze the provided Myanmar NRC document image. Locate and extract all fields. "
+        "The **NRC State Code** must be a number between 1 and 14 (output as a standard digit). "
+        "The **NRC Full Number** must be the complete string, including the State Code, Township Code, "
+        "classification in parentheses (C, N, or A), and the 6-digit citizen number, following the pattern: X/XXX(Y)######. "
+        "Ensure the Name, Father's Name, and Date of Birth are captured precisely from the **handwriting**. "
         "Return the output as a single JSON object."
     )
     
@@ -210,20 +233,21 @@ def extract_nrc_data(image_bytes: bytes) -> Optional[Dict[str, Any]]:
         )
         response.raise_for_status()
         result = response.json()
+        
+        # Safely extract the JSON string
         json_string = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text')
         
         if json_string:
             extracted_data = json.loads(json_string)
             
-            # --- NEW STEP: Store Original Data ---
             st.session_state['original_data'] = extracted_data.copy()
+            st.session_state['enhanced_image_bytes'] = enhanced_image_bytes # Store enhanced image
             
             # Run Validation
             warnings = validate_nrc_data(extracted_data)
             extracted_data['validation_warnings'] = warnings
             
             return extracted_data
-        # ... (error handling remains the same) ...
         else:
             error_detail = result.get('candidates', [{}])[0].get('finishReason', 'No content generated.')
             st.error(f"Error: Could not extract structured JSON. Finish Reason: {error_detail}")
@@ -235,7 +259,7 @@ def extract_nrc_data(image_bytes: bytes) -> Optional[Dict[str, Any]]:
         return None
 
 
-# --- Custom Logic to Handle Text Input Updates (MODIFIED to calculate score) ---
+# --- Custom Logic to Handle Text Input Updates (Unchanged) ---
 
 def update_data_from_fields(fields_data: Dict[str, str]):
     """
@@ -264,7 +288,7 @@ def update_data_from_fields(fields_data: Dict[str, str]):
         # 2. Re-validate the human-corrected data
         updated_data['validation_warnings'] = validate_nrc_data(updated_data)
 
-        # 3. Calculate Accuracy Score (NEW)
+        # 3. Calculate Accuracy Score
         original_data = st.session_state.get('original_data', {})
         accuracy = calculate_accuracy_score(original_data, updated_data)
         st.session_state['accuracy_score'] = accuracy
@@ -276,18 +300,21 @@ def update_data_from_fields(fields_data: Dict[str, str]):
         st.error(f"An unexpected error occurred during update: {e}")
 
 
-# --- Streamlit App UI (MODIFIED for Accuracy Score Display) ---
+# --- Streamlit App UI (MODIFIED for Image Tabs) ---
 
 def main():
-    st.set_page_config(page_title="NRC Document Data Extractor", layout="centered")
+    st.set_page_config(page_title="NRC Document Data Extractor V2", layout="centered")
 
-    st.title("🇲🇲 NRC Document Data Extractor (Performance Tracking)")
-    st.markdown("Extract data, correct errors via text inputs, and measure the AI's performance.")
+    st.title("🇲🇲 NRC Document Data Extractor V2")
+    st.subheader("Step 1: Focus on Image Quality and Handwriting Recognition")
+    st.markdown("We are now using **sharpening and contrast enhancement** before sending the image to the AI, and using a **more focused prompt** to improve handwritten text accuracy.")
 
     # Initialize session state for data storage
     if 'extracted_data' not in st.session_state: st.session_state['extracted_data'] = None
     if 'original_data' not in st.session_state: st.session_state['original_data'] = None
     if 'accuracy_score' not in st.session_state: st.session_state['accuracy_score'] = None
+    if 'enhanced_image_bytes' not in st.session_state: st.session_state['enhanced_image_bytes'] = None
+
 
     # --- INPUT SELECTION ---
     tab1, tab2 = st.tabs(["🖼️ Upload Image", "📸 Take Photo"])
@@ -305,17 +332,33 @@ def main():
 
     if selected_source is not None:
         image_bytes = selected_source.getvalue()
-        st.image(image_bytes, caption='Input NRC Document', use_column_width=True)
+        
+        # Display images in tabs for comparison
+        img_tab1, img_tab2 = st.tabs(["Original Image", "Enhanced (Pre-Processed) Image"])
+
+        with img_tab1:
+            st.image(image_bytes, caption='Original Input Document', use_column_width=True)
+
+        with img_tab2:
+            if 'enhanced_image_bytes' in st.session_state and st.session_state['enhanced_image_bytes'] is not None:
+                st.image(st.session_state['enhanced_image_bytes'], caption='Sharpened & Contrast Enhanced Image Sent to AI', use_column_width=True)
+            else:
+                st.info("The enhanced image preview will appear here after extraction.")
+
         st.divider()
 
         # Button to trigger extraction
-        if st.button("1. Extract & Validate Data", type="primary"):
+        if st.button("1. Extract & Validate Data (Using Enhanced Image)", type="primary"):
+            # Clear previous results before new extraction
             st.session_state['extracted_data'] = None 
-            st.session_state['accuracy_score'] = None # Clear previous scores
+            st.session_state['accuracy_score'] = None
+            st.session_state['enhanced_image_bytes'] = None 
+            
+            # This call now handles the enhancement internally
             extracted_data = extract_nrc_data(image_bytes)
+            
             if extracted_data:
                 st.session_state['extracted_data'] = extracted_data
-                # Initial accuracy is 1.0 (100%) until corrected by human
                 st.session_state['accuracy_score'] = 1.0 
                 st.rerun() 
                 
@@ -326,7 +369,7 @@ def main():
             confidence = data.get('Overall_Confidence_Score')
             accuracy = st.session_state.get('accuracy_score', 1.0)
             
-            # --- Performance Metrics Section (NEW) ---
+            # --- Performance Metrics Section ---
             st.header("✨ Performance Metrics")
             col_conf, col_acc = st.columns(2)
             
@@ -361,7 +404,6 @@ def main():
             # --- Text Input Fields for Correction ---
             with st.form("correction_form"):
                 
-                # Use the latest data (corrected or original) for the input boxes
                 current_data = st.session_state['extracted_data']
                 
                 # --- NRC Fields ---
@@ -430,10 +472,9 @@ def main():
             st.markdown("---")
 
             # 4. Final Data Display and Download
-            # Use the latest data after potential human correction
             final_data_view = [
                 ("Confidence Score", f"{data.get('Overall_Confidence_Score', 0.0) * 100:.0f}%"), 
-                ("Accuracy Score", f"{accuracy * 100:.2f}%"), # Include final accuracy in the table
+                ("Accuracy Score", f"{accuracy * 100:.2f}%"), 
                 ("NRC State Code", data.get("NRC_State_Code", "N/A")),
                 ("NRC Number (အမှတ်)", data.get("NRC_Number", "N/A")),
                 ("Name (အမည်)", data.get("Name", "N/A")),
@@ -449,11 +490,10 @@ def main():
             # Download Button (Data remains the same structure)
             download_data = data.copy()
             download_data.pop('validation_warnings', None)
-            download_data['OCR_Accuracy_Score'] = accuracy # Add accuracy to downloadable JSON
+            download_data['OCR_Accuracy_Score'] = accuracy 
             
             json_output = json.dumps(download_data, indent=2)
             
-            # Prepare CSV output
             header = list(download_data.keys())
             values = [str(download_data[k]) for k in header]
             csv_output = ",".join(header) + "\n" + ",".join(values)
@@ -476,7 +516,7 @@ def main():
 
 
     else:
-        st.info("Please upload an image file or take a photo and click '1. Extract & Validate Data' to begin.")
+        st.info("Please upload an image file or take a photo and click '1. Extract & Validate Data' to begin. Check the 'Enhanced Image' tab after extraction to see the image sent to the AI.")
 
 if __name__ == "__main__":
     main()
