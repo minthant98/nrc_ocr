@@ -63,7 +63,7 @@ JSON_SCHEMA = {
     "required": ["Overall_Confidence_Score", "NRC_state_division", "NRC_township", "NRC_sth", "NRC_no", "Name", "Fathers_Name", "Date_of_Birth"] 
 }
 
-# --- SYSTEM INSTRUCTION (REVERTED TO V7 FOR CLARITY AND PERFORMANCE) ---
+# --- SYSTEM INSTRUCTION (V7: Clear and Concise) ---
 SYSTEM_INSTRUCTION = (
     "You are an expert Optical Character Recognition (OCR) and Intelligent Document "
     "Processing (IDP) system specialized in reading Myanmar National Registration Card (NRC) documents. "
@@ -78,7 +78,7 @@ SYSTEM_INSTRUCTION = (
 )
 
 
-# --- Image Pre-Processing Pipeline (UPDATED: Aggressive Contrast/Binarization) ---
+# --- Image Pre-Processing Pipeline (V7 R: Revert to Sharpening 2.0x and Contrast 1.5x) ---
 
 def rotate_image_from_exif(img: Image.Image) -> Image.Image:
     """
@@ -113,8 +113,8 @@ def image_to_bytes(img: Image.Image) -> bytes:
 
 def process_image(image_bytes: bytes, rotation_angle: int = 0) -> bytes:
     """
-    Applies auto-rotation, manual rotation, and aggressive contrast enhancement 
-    to simulate binarization, ideal for handwriting.
+    Applies auto-rotation, manual rotation, and the original V7 enhancement 
+    (Sharpen 2.0x, Contrast 1.5x) which yielded the 78% accuracy.
     """
     try:
         img = Image.open(io.BytesIO(image_bytes))
@@ -130,19 +130,18 @@ def process_image(image_bytes: bytes, rotation_angle: int = 0) -> bytes:
         # Store the manually rotated PIL image in session state for display
         st.session_state['current_image_bytes'] = image_to_bytes(img)
 
-        # --- Aggressive Handwriting Enhancement Pipeline ---
+        # --- Reverted Handwriting Enhancement Pipeline (V7 R) ---
         
         # 3. Convert to Grayscale
         img_gray = img.convert("L")
         
-        # 4. Sharpen (subtle sharpening to define ink edges)
+        # 4. Sharpen (Original 2.0x Sharpening)
         sharpen_filter = ImageEnhance.Sharpness(img_gray)
-        img_sharpened = sharpen_filter.enhance(1.5) # Slightly less aggressive than before
+        img_sharpened = sharpen_filter.enhance(2.0) 
 
-        # 5. Aggressive Contrast Increase (Simulates Binarization)
-        # Factor of 4.0 should force handwriting to be pure black on white background
+        # 5. Moderate Contrast Increase (Original 1.5x Contrast)
         contrast_filter = ImageEnhance.Contrast(img_sharpened)
-        img_final = contrast_filter.enhance(4.0) 
+        img_final = contrast_filter.enhance(1.5) 
         
         # 6. Convert back to bytes (using PNG format for quality retention)
         final_bytes = image_to_bytes(img_final)
@@ -265,7 +264,7 @@ def extract_nrc_data(enhanced_image_bytes: bytes) -> Optional[Dict[str, Any]]:
         st.error("API Key or URL is missing. Please configure them.")
         return None
         
-    st.info("Sending **aggressively contrasted and oriented** document to Gemini API for optimized handwriting recognition.")
+    st.info("Sending **sharpened (2.0x) and contrasted (1.5x)** document to Gemini API.")
     
     # Use image/png mime type since we saved it as PNG for better quality retention
     base64_image = base64.b64encode(enhanced_image_bytes).decode('utf-8')
@@ -363,11 +362,11 @@ def rotate_uploaded_image(angle: int):
 # --- Streamlit App UI (Core Fields Only) ---
 
 def main():
-    st.set_page_config(page_title="NRC Document Data Extractor V9", layout="centered")
+    st.set_page_config(page_title="NRC Document Data Extractor V7 R (Revert)", layout="centered")
 
-    st.title("🇲🇲 NRC Document Data Extractor V9")
-    st.subheader("Aggressive Image Enhancement for Handwritten Burmese OCR")
-    st.markdown("This version reverts to the high-performing prompt (V7) and applies **strong contrast and grayscale processing** to maximize handwriting legibility.")
+    st.title("🇲🇲 NRC Document Data Extractor V7 R (Revert)")
+    st.subheader("Reverted to Original Image Enhancement (Sharpen 2.0x, Contrast 1.5x)")
+    st.markdown("This version represents the stable baseline that previously achieved 78% accuracy on scanned images.")
 
     # Initialize session state for data storage
     if 'extracted_data' not in st.session_state: st.session_state['extracted_data'] = None
@@ -429,7 +428,7 @@ def main():
 
         with img_tab2:
             if 'enhanced_image_bytes' in st.session_state and st.session_state['enhanced_image_bytes'] is not None:
-                st.image(st.session_state['enhanced_image_bytes'], caption='Grayscale & Aggressively Contrasted for Handwriting', use_column_width=True)
+                st.image(st.session_state['enhanced_image_bytes'], caption='Sharpened (2.0x) and Contrasted (1.5x)', use_column_width=True)
             else:
                 st.info("The AI processed image preview will appear here after extraction.")
 
@@ -522,14 +521,14 @@ def main():
                 st.download_button(
                     label="⬇️ Download Final JSON",
                     data=json_output,
-                    file_name="nrc_data_corrected_v9.json",
+                    file_name="nrc_data_corrected_v7_r.json",
                     mime="application/json",
                 )
             with col_dl2:
                 st.download_button(
                     label="⬇️ Download Final CSV",
                     data=csv_output,
-                    file_name="nrc_data_corrected_v9.csv",
+                    file_name="nrc_data_corrected_v7_r.csv",
                     mime="text/csv",
                 )
 
