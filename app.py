@@ -350,32 +350,35 @@ def main():
     if 'enhanced_image_bytes' not in st.session_state: st.session_state['enhanced_image_bytes'] = None
     if 'uploaded_file_bytes' not in st.session_state: st.session_state['uploaded_file_bytes'] = None
     if 'current_image_bytes' not in st.session_state: st.session_state['current_image_bytes'] = None
+    if 'uploaded_file_name' not in st.session_state: st.session_state['uploaded_file_name'] = None
 
 
-    # --- INPUT SELECTION ---
+    # --- INPUT SELECTION (FIXED) ---
     tab1, tab2 = st.tabs(["🖼️ Upload Image", "📸 Take Photo"])
 
     uploaded_file = None
-    camera_image = None
     
-    # Process file/camera input and store bytes in session state
+    # Process file/camera input using local variables (Fixes StreamlitAPIException)
     with tab1:
-        tab1.session_state['file_uploader'] = st.file_uploader("Upload Myanmar NRC Image", type=["png", "jpg", "jpeg"])
+        uploaded_file_widget = st.file_uploader("Upload Myanmar NRC Image", type=["png", "jpg", "jpeg"])
     with tab2:
-        tab2.session_state['camera_input'] = st.camera_input("Take a Photo of NRC")
+        camera_image_widget = st.camera_input("Take a Photo of NRC")
 
-
-    if tab1.session_state['file_uploader'] and tab1.session_state['file_uploader'] is not None:
-        uploaded_file = tab1.session_state['file_uploader']
-        if st.session_state.get('uploaded_file_name') != uploaded_file.name:
-            st.session_state['uploaded_file_bytes'] = uploaded_file.getvalue()
-            st.session_state['uploaded_file_name'] = uploaded_file.name
-            st.session_state['current_image_bytes'] = uploaded_file.getvalue()
-    elif tab2.session_state['camera_input'] and tab2.session_state['camera_input'] is not None:
-        camera_image = tab2.session_state['camera_input']
-        st.session_state['uploaded_file_bytes'] = camera_image.getvalue()
-        st.session_state['current_image_bytes'] = camera_image.getvalue()
+    if uploaded_file_widget:
+        uploaded_file = uploaded_file_widget
+    elif camera_image_widget:
+        uploaded_file = camera_image_widget
         
+    
+    if uploaded_file:
+        file_name_or_default = getattr(uploaded_file, 'name', 'camera_image_file')
+
+        # Only update session state bytes if a new file/photo is detected
+        if st.session_state['uploaded_file_name'] != file_name_or_default:
+            st.session_state['uploaded_file_bytes'] = uploaded_file.getvalue()
+            st.session_state['uploaded_file_name'] = file_name_or_default
+            st.session_state['current_image_bytes'] = uploaded_file.getvalue() # Stores the potentially initial (or rotated) image
+
     
     if st.session_state.get('uploaded_file_bytes'):
         image_bytes_to_display = st.session_state['current_image_bytes']
