@@ -23,7 +23,7 @@ except KeyError:
 # The URL for the Gemini API model endpoint
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
 
-# --- Data Mapping and Schemas (UPDATED) ---
+# --- Data Mapping and Schemas (UPDATED: Core Fields Only) ---
 JSON_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -58,32 +58,21 @@ JSON_SCHEMA = {
         "Date_of_Birth": {
             "type": "STRING",
             "description": "The cardholder's date of birth (မွေးသက္ကရာဇ်), extracted **precisely** in the original handwritten Burmese script (e.g., date, month, year, including original Burmese numbers/characters)."
-        },
-        "Height": {
-            "type": "STRING",
-            "description": "The cardholder's height (အရပ်), in the original Burmese script and units."
-        },
-        "Religion": {
-            "type": "STRING",
-            "description": "The cardholder's religion (ကိုးကွယ်သည့်ဘာသာ), in the original Burmese script."
-        },
-        "Blood_Type": {
-            "type": "STRING",
-            "description": "The cardholder's blood type (သွေးအမျိုးအစား), including the Rh factor, if available."
         }
     },
     "required": ["Overall_Confidence_Score", "NRC_state_division", "NRC_township", "NRC_sth", "NRC_no", "Name", "Fathers_Name", "Date_of_Birth"] 
 }
 
-# --- SYSTEM INSTRUCTION (UPDATED) ---
+# --- SYSTEM INSTRUCTION (UPDATED: Focus on Core Fields) ---
 SYSTEM_INSTRUCTION = (
     "You are an expert Optical Character Recognition (OCR) and Intelligent Document "
     "Processing (IDP) system specialized in reading Myanmar National Registration Card (NRC) documents. "
-    "Your primary task is to **meticulously and accurately** extract the required fields, prioritizing the **precise recognition "
-    "of handwritten Burmese script** for fields like Name(အမည်), Fathers_Name(အဘအမည်), Date_of_Birt(မွေးသက္ကရာဇ်)h, and NRC_township. "
-    "The NRC number must be broken down into four components: NRC_state_division (1-14, burmese digits), NRC_township (Burmese script), "
-    "NRC_sth (e.g., (N), burmese scripts), and NRC_no (6 digits, burmese digits). "
-    "All numerical values must be output as standard burmese digits (၀-၉). "
+    "Your primary task is to **meticulously and accurately** extract ONLY the core identity fields: the full NRC number breakdown, "
+    "Name, Father's Name, and Date of Birth. Prioritize the **precise recognition of handwritten Burmese script** "
+    "for fields like Name, Fathers_Name, Date_of_Birth, and NRC_township. "
+    "The NRC number must be broken down into four components: NRC_state_division (1-14, Latin digits), NRC_township (Burmese script), "
+    "NRC_sth (e.g., (N), Latin letters), and NRC_no (6 digits, Latin digits). "
+    "All numerical values must be output as standard Latin digits (0-9). "
     "Crucially, you must provide an Overall_Confidence_Score (0.0 to 1.0) based on the image quality and legibility. "
     "Output the results ONLY as a JSON object conforming to the provided schema."
 )
@@ -155,7 +144,7 @@ def process_image(image_bytes: bytes, rotation_angle: int = 0) -> bytes:
         st.warning(f"Image processing pipeline failed: {e}. Using original image bytes.")
         return image_bytes
 
-# --- Validation and Utility Functions (UPDATED) ---
+# --- Validation and Utility Functions (Unchanged) ---
 def is_valid_date(burmese_date_str: str) -> bool:
     """Tries to parse a date from the Burmese string and validates it."""
     today = date.today()
@@ -203,14 +192,15 @@ def validate_nrc_data(data: Dict[str, Any]) -> List[str]:
         
     return warnings
 
+# --- Accuracy Score (UPDATED: Core Fields Only) ---
 def calculate_accuracy_score(original_data: Dict[str, Any], corrected_data: Dict[str, Any]) -> float:
     """
     Calculates a field-level string similarity score between the model's output and the human-corrected output.
-    (UPDATED to use new NRC fields)
+    Focuses only on the core fields: NRC components, Name, Fathers_Name, and Date_of_Birth.
     """
     fields_to_compare = [
         "NRC_state_division", "NRC_township", "NRC_sth", "NRC_no", 
-        "Name", "Fathers_Name", "Date_of_Birth", "Height", "Religion", "Blood_Type"
+        "Name", "Fathers_Name", "Date_of_Birth"
     ]
     total_score = 0.0
     
@@ -266,14 +256,15 @@ def extract_nrc_data(enhanced_image_bytes: bytes) -> Optional[Dict[str, Any]]:
     base64_image = base64.b64encode(enhanced_image_bytes).decode('utf-8')
     mime_type = "image/jpeg" 
     
-    # --- CONSTRUCT HOLISTIC USER QUERY (Emphasizing the new breakdown) ---
+    # --- CONSTRUCT HOLISTIC USER QUERY (Emphasizing core fields) ---
     user_query = (
-        "Analyze the provided Myanmar NRC document image. Extract the values for the following fields. "
+        "Analyze the provided Myanmar NRC document image. Extract the values for ONLY the core identity fields: "
+        "the four NRC components, Name, Father's Name, and Date of Birth. "
         "Crucially, split the NRC number (X/XXX(Y)######) into its four requested components: "
-        "1. NRC_state_division (X, burmese digits 1-14) "
+        "1. NRC_state_division (X, Latin digits 1-14) "
         "2. NRC_township (XXX, Burmese words between '/' and '(', in original Burmese script) "
         "3. NRC_sth ((Y), the classification code including parentheses, e.g., (N), (C), or (A)) "
-        "4. NRC_no (######, the 6-digit number, burmese digits) "
+        "4. NRC_no (######, the 6-digit number, Latin digits) "
         "Ensure Name, Father's Name, and Date of Birth are copied exactly as written in the original handwritten Burmese script. "
         "Return the output as a single JSON object."
     )
@@ -354,14 +345,14 @@ def rotate_uploaded_image(angle: int):
         st.error(f"Error during manual rotation: {e}")
 
 
-# --- Streamlit App UI (UPDATED FOR ORDER) ---
+# --- Streamlit App UI (UPDATED FOR CORE FIELDS) ---
 
 def main():
-    st.set_page_config(page_title="NRC Document Data Extractor V6", layout="centered")
+    st.set_page_config(page_title="NRC Document Data Extractor V7", layout="centered")
 
-    st.title("🇲🇲 NRC Document Data Extractor V6")
-    st.subheader("Granular Extraction: NRC Number Split into 4 Parts")
-    st.markdown("The NRC number is now split into its components: **State/Division**, **Township Code (Burmese)**, **Classification Code (N/C/A)**, and **6-Digit Number**.")
+    st.title("🇲🇲 NRC Document Data Extractor V7")
+    st.subheader("Focused Extraction: Core Identity Fields Only")
+    st.markdown("This version focuses solely on the **NRC number breakdown (4 parts), Name, Father's Name, and Date of Birth** for maximum accuracy on critical data.")
 
     # Initialize session state for data storage
     if 'extracted_data' not in st.session_state: st.session_state['extracted_data'] = None
@@ -495,9 +486,6 @@ def main():
                 ("Name (အမည်)", data.get("Name", "N/A")),
                 ("Father's Name (အဘအမည်)", data.get("Fathers_Name", "N/A")),
                 ("Date of Birth (မွေးသက္ကရာဇ်)", data.get("Date_of_Birth", "N/A")),
-                ("Height (အရပ်)", data.get("Height", "N/A")),
-                ("Religion (ကိုးကွယ်သည့်ဘာသာ)", data.get("Religion", "N/A")),
-                ("Blood Type (သွေးအမျိုးအစား)", data.get("Blood_Type", "N/A"))
             ]
             st.subheader("✅ 3. Current Extracted Data Snapshot")
             st.table(final_data_view)
@@ -509,6 +497,7 @@ def main():
             
             json_output = json.dumps(download_data, indent=2)
             
+            # Create CSV headers and values from the data keys
             header = list(download_data.keys())
             values = [str(download_data[k]) for k in header]
             csv_output = ",".join(header) + "\n" + ",".join(values)
@@ -518,22 +507,22 @@ def main():
                 st.download_button(
                     label="⬇️ Download Final JSON",
                     data=json_output,
-                    file_name="nrc_data_corrected_v6.json",
+                    file_name="nrc_data_corrected_v7.json",
                     mime="application/json",
                 )
             with col_dl2:
                 st.download_button(
                     label="⬇️ Download Final CSV",
                     data=csv_output,
-                    file_name="nrc_data_corrected_v6.csv",
+                    file_name="nrc_data_corrected_v7.csv",
                     mime="text/csv",
                 )
 
             st.markdown("---")
 
-            # 4. Human-in-the-Loop Correction (Text Fields) (MOVED DOWN)
+            # 4. Human-in-the-Loop Correction (Text Fields) (MOVED DOWN & SIMPLIFIED)
             st.subheader("✍️ 4. Correct Data & Recalculate Accuracy")
-            st.markdown("Review and correct any errors below. **Any change will be used to calculate the model's accuracy.**")
+            st.markdown("Review and correct any errors below. **Only core fields are shown.** Any change will be used to calculate the model's accuracy.")
             
             # --- Text Input Fields for Correction ---
             with st.form("correction_form"):
@@ -579,34 +568,26 @@ def main():
                     "Name (အမည်)",
                     value=current_data.get('Name', ''),
                     key='Name_input',
-                    help="Enter the cardholder's name in original Burmese script."
+                    help="Enter the cardholder's name in original handwritten Burmese script."
                 )
                 Fathers_Name = st.text_input(
                     "Father's Name (အဘအမည်)",
                     value=current_data.get('Fathers_Name', ''),
                     key='Fathers_Name_input',
-                    help="Enter the father's name in original Burmese script."
+                    help="Enter the father's name in original handwritten Burmese script."
                 )
                 Date_of_Birth = st.text_input(
                     "Date of Birth (မွေးသက္ကရာဇ်)",
                     value=current_data.get('Date_of_Birth', ''),
                     key='Date_of_Birth_input',
-                    help="Enter the date in original Burmese script (e.g., date, month, year)."
+                    help="Enter the date in original handwritten Burmese script (e.g., date, month, year)."
                 )
-
-                # --- Optional Fields ---
-                col5, col6, col7 = st.columns(3)
-                with col5:
-                    Height = st.text_input("Height (အရပ်)", value=current_data.get('Height', ''), key='Height_input')
-                with col6:
-                    Religion = st.text_input("Religion (ကိုးကွယ်သည့်ဘာသာ)", value=current_data.get('Religion', ''), key='Religion_input')
-                with col7:
-                    Blood_Type = st.text_input("Blood Type (သွေးအမျိုးအစား)", value=current_data.get('Blood_Type', ''), key='Blood_Type_input')
 
                 # Button to submit corrections
                 submitted = st.form_submit_button("Update and Re-Validate Extracted Data", type="secondary")
                 
                 if submitted:
+                    # Only include the fields present in the form
                     fields_data = {
                         "NRC_state_division": NRC_state_division,
                         "NRC_township": NRC_township,
@@ -615,9 +596,6 @@ def main():
                         "Name": Name,
                         "Fathers_Name": Fathers_Name,
                         "Date_of_Birth": Date_of_Birth,
-                        "Height": Height,
-                        "Religion": Religion,
-                        "Blood_Type": Blood_Type,
                     }
                     update_data_from_fields(fields_data)
                     st.rerun()
