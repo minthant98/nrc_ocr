@@ -23,7 +23,7 @@ except KeyError:
 # The URL for the Gemini API model endpoint
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
 
-# --- Data Mapping and Schemas (UPDATED: Core Fields Only) ---
+# --- Data Mapping and Schemas (Core Fields Only) ---
 JSON_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -63,7 +63,7 @@ JSON_SCHEMA = {
     "required": ["Overall_Confidence_Score", "NRC_state_division", "NRC_township", "NRC_sth", "NRC_no", "Name", "Fathers_Name", "Date_of_Birth"] 
 }
 
-# --- SYSTEM INSTRUCTION (UPDATED: Focus on Core Fields) ---
+# --- SYSTEM INSTRUCTION (REVERTED TO V7 FOR CLARITY AND PERFORMANCE) ---
 SYSTEM_INSTRUCTION = (
     "You are an expert Optical Character Recognition (OCR) and Intelligent Document "
     "Processing (IDP) system specialized in reading Myanmar National Registration Card (NRC) documents. "
@@ -78,7 +78,7 @@ SYSTEM_INSTRUCTION = (
 )
 
 
-# --- Image Pre-Processing Pipeline (Unchanged) ---
+# --- Image Pre-Processing Pipeline (UPDATED: Aggressive Contrast/Binarization) ---
 
 def rotate_image_from_exif(img: Image.Image) -> Image.Image:
     """
@@ -107,12 +107,14 @@ def rotate_image_from_exif(img: Image.Image) -> Image.Image:
 def image_to_bytes(img: Image.Image) -> bytes:
     """Converts a PIL Image object back to JPEG bytes."""
     buffer = io.BytesIO()
-    img.save(buffer, format="JPEG", quality=90)
+    # Save as PNG to avoid extra JPEG compression artifacts after enhancement
+    img.save(buffer, format="PNG") 
     return buffer.getvalue()
 
 def process_image(image_bytes: bytes, rotation_angle: int = 0) -> bytes:
     """
-    Applies auto-rotation, manual rotation, sharpening, and contrast enhancement.
+    Applies auto-rotation, manual rotation, and aggressive contrast enhancement 
+    to simulate binarization, ideal for handwriting.
     """
     try:
         img = Image.open(io.BytesIO(image_bytes))
@@ -125,21 +127,28 @@ def process_image(image_bytes: bytes, rotation_angle: int = 0) -> bytes:
             img = img.rotate(rotation_angle, expand=True)
             st.info(f"Manually rotated image by {rotation_angle}°.")
 
-        # 3. Sharpen the image (Factor of 2.0)
-        sharpen_filter = ImageEnhance.Sharpness(img)
-        img_sharpened = sharpen_filter.enhance(2.0)
-        
-        # 4. Increase contrast (Factor of 1.5)
-        contrast_filter = ImageEnhance.Contrast(img_sharpened)
-        img_final = contrast_filter.enhance(1.5)
-        
-        # 5. Convert back to bytes and store the PIL object for later use
-        final_bytes = image_to_bytes(img_final)
-
-        # Store the manually rotated PIL image in session state for re-runs
+        # Store the manually rotated PIL image in session state for display
         st.session_state['current_image_bytes'] = image_to_bytes(img)
+
+        # --- Aggressive Handwriting Enhancement Pipeline ---
+        
+        # 3. Convert to Grayscale
+        img_gray = img.convert("L")
+        
+        # 4. Sharpen (subtle sharpening to define ink edges)
+        sharpen_filter = ImageEnhance.Sharpness(img_gray)
+        img_sharpened = sharpen_filter.enhance(1.5) # Slightly less aggressive than before
+
+        # 5. Aggressive Contrast Increase (Simulates Binarization)
+        # Factor of 4.0 should force handwriting to be pure black on white background
+        contrast_filter = ImageEnhance.Contrast(img_sharpened)
+        img_final = contrast_filter.enhance(4.0) 
+        
+        # 6. Convert back to bytes (using PNG format for quality retention)
+        final_bytes = image_to_bytes(img_final)
         
         return final_bytes
+        
     except Exception as e:
         st.warning(f"Image processing pipeline failed: {e}. Using original image bytes.")
         return image_bytes
@@ -149,15 +158,18 @@ def is_valid_date(burmese_date_str: str) -> bool:
     """Tries to parse a date from the Burmese string and validates it."""
     today = date.today()
     import re
+    # Look for a 4-digit number (representing the year)
     year_match = re.search(r'(\d{4})', burmese_date_str)
     if year_match:
         try:
             year = int(year_match.group(1))
+            # Basic plausibility checks
             if year > today.year: return False
-            if today.year - year > 200: return False
+            if today.year - year > 150: return False # Max age 150 years
             return True
         except ValueError:
             return False
+    # If no Latin year found, we assume it's entirely in Burmese script and cannot validate the year easily
     return True 
 
 def validate_nrc_data(data: Dict[str, Any]) -> List[str]:
@@ -182,17 +194,18 @@ def validate_nrc_data(data: Dict[str, Any]) -> List[str]:
     
     # 3. Validate NRC Status (sth)
     nrc_sth = str(data.get('NRC_sth', '')).strip()
+    # Check if it looks like (A), (C), or (N) including parentheses
     if nrc_sth and not (nrc_sth.startswith('(') and nrc_sth.endswith(')') and len(nrc_sth) >= 3):
         warnings.append(f"NRC Classification Code ('NRC_sth') '{nrc_sth}' should be formatted as (C), (N), or (A) and include parentheses.")
 
     # 4. Validate Date of Birth
     dob_burmese = data.get('Date_of_Birth', '').strip()
     if dob_burmese and not is_valid_date(dob_burmese):
-        warnings.append(f"Date of Birth '{dob_burmese}' appears invalid (e.g., future date or over 200 years old).")
+        warnings.append(f"Date of Birth '{dob_burmese}' appears suspicious (e.g., future date or over 150 years old, based on Latin digits if found).")
         
     return warnings
 
-# --- Accuracy Score (UPDATED: Core Fields Only) ---
+# --- Accuracy Score (Core Fields Only) ---
 def calculate_accuracy_score(original_data: Dict[str, Any], corrected_data: Dict[str, Any]) -> float:
     """
     Calculates a field-level string similarity score between the model's output and the human-corrected output.
@@ -208,11 +221,12 @@ def calculate_accuracy_score(original_data: Dict[str, Any], corrected_data: Dict
         original_value = str(original_data.get(field, "")).strip()
         corrected_value = str(corrected_data.get(field, "")).strip()
         
+        # Calculate similarity only if at least one value is present
         if original_value or corrected_value:
             similarity_ratio = difflib.SequenceMatcher(None, original_value, corrected_value).ratio()
             total_score += similarity_ratio
         else:
-            total_score += 1.0 
+            total_score += 1.0 # Perfect match if both are empty
             
     accuracy = total_score / len(fields_to_compare)
     return accuracy
@@ -251,10 +265,11 @@ def extract_nrc_data(enhanced_image_bytes: bytes) -> Optional[Dict[str, Any]]:
         st.error("API Key or URL is missing. Please configure them.")
         return None
         
-    st.info("Sending **oriented and enhanced** document to Gemini API for extraction. The model will use structural context to find the fields.")
+    st.info("Sending **aggressively contrasted and oriented** document to Gemini API for optimized handwriting recognition.")
     
+    # Use image/png mime type since we saved it as PNG for better quality retention
     base64_image = base64.b64encode(enhanced_image_bytes).decode('utf-8')
-    mime_type = "image/jpeg" 
+    mime_type = "image/png" 
     
     # --- CONSTRUCT HOLISTIC USER QUERY (Emphasizing core fields) ---
     user_query = (
@@ -262,7 +277,7 @@ def extract_nrc_data(enhanced_image_bytes: bytes) -> Optional[Dict[str, Any]]:
         "the four NRC components, Name, Father's Name, and Date of Birth. "
         "Crucially, split the NRC number (X/XXX(Y)######) into its four requested components: "
         "1. NRC_state_division (X, Latin digits 1-14) "
-        "2. NRC_township (XXX, Burmese words between '/' and '(', in original Burmese script) "
+        "2. NRC_township (XXX, Burmese words between '/' and '(') "
         "3. NRC_sth ((Y), the classification code including parentheses, e.g., (N), (C), or (A)) "
         "4. NRC_no (######, the 6-digit number, Latin digits) "
         "Ensure Name, Father's Name, and Date of Birth are copied exactly as written in the original handwritten Burmese script. "
@@ -345,14 +360,14 @@ def rotate_uploaded_image(angle: int):
         st.error(f"Error during manual rotation: {e}")
 
 
-# --- Streamlit App UI (UPDATED FOR CORE FIELDS) ---
+# --- Streamlit App UI (Core Fields Only) ---
 
 def main():
-    st.set_page_config(page_title="NRC Document Data Extractor V7", layout="centered")
+    st.set_page_config(page_title="NRC Document Data Extractor V9", layout="centered")
 
-    st.title("MM NRC Document Data Extractor V7")
-    st.subheader("Focused Extraction: Core Identity Fields Only")
-    st.markdown("This version focuses solely on the **NRC number breakdown (4 parts), Name, Father's Name, and Date of Birth** for maximum accuracy on critical data.")
+    st.title("🇲🇲 NRC Document Data Extractor V9")
+    st.subheader("Aggressive Image Enhancement for Handwritten Burmese OCR")
+    st.markdown("This version reverts to the high-performing prompt (V7) and applies **strong contrast and grayscale processing** to maximize handwriting legibility.")
 
     # Initialize session state for data storage
     if 'extracted_data' not in st.session_state: st.session_state['extracted_data'] = None
@@ -414,7 +429,7 @@ def main():
 
         with img_tab2:
             if 'enhanced_image_bytes' in st.session_state and st.session_state['enhanced_image_bytes'] is not None:
-                st.image(st.session_state['enhanced_image_bytes'], caption='Sharpened & Contrast Enhanced Image Sent to AI', use_column_width=True)
+                st.image(st.session_state['enhanced_image_bytes'], caption='Grayscale & Aggressively Contrasted for Handwriting', use_column_width=True)
             else:
                 st.info("The AI processed image preview will appear here after extraction.")
 
@@ -507,22 +522,22 @@ def main():
                 st.download_button(
                     label="⬇️ Download Final JSON",
                     data=json_output,
-                    file_name="nrc_data_corrected_v7.json",
+                    file_name="nrc_data_corrected_v9.json",
                     mime="application/json",
                 )
             with col_dl2:
                 st.download_button(
                     label="⬇️ Download Final CSV",
                     data=csv_output,
-                    file_name="nrc_data_corrected_v7.csv",
+                    file_name="nrc_data_corrected_v9.csv",
                     mime="text/csv",
                 )
 
             st.markdown("---")
 
-            # 4. Human-in-the-Loop Correction (Text Fields) (MOVED DOWN & SIMPLIFIED)
+            # 4. Human-in-the-Loop Correction (Text Fields)
             st.subheader("✍️ 4. Correct Data & Recalculate Accuracy")
-            st.markdown("Review and correct any errors below. **Only core fields are shown.** Any change will be used to calculate the model's accuracy.")
+            st.markdown("Review and correct any errors below. Any change will be used to calculate the model's accuracy.")
             
             # --- Text Input Fields for Correction ---
             with st.form("correction_form"):
