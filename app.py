@@ -23,7 +23,7 @@ except KeyError:
 # The URL for the Gemini API model endpoint
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
 
-# --- Data Mapping and Schemas (UPDATED: Core Fields Only) ---
+# --- Data Mapping and Schemas (Core Fields Only) ---
 JSON_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -63,17 +63,23 @@ JSON_SCHEMA = {
     "required": ["Overall_Confidence_Score", "NRC_state_division", "NRC_township", "NRC_sth", "NRC_no", "Name", "Fathers_Name", "Date_of_Birth"] 
 }
 
-# --- SYSTEM INSTRUCTION (UPDATED: Focus on Core Fields) ---
+# --- SYSTEM INSTRUCTION (UPDATED: Added Contextual Guidance) ---
 SYSTEM_INSTRUCTION = (
-    "You are an expert Optical Character Recognition (OCR) and Intelligent Document "
-    "Processing (IDP) system specialized in reading Myanmar National Registration Card (NRC) documents. "
-    "Your primary task is to **meticulously and accurately** extract ONLY the core identity fields: the full NRC number breakdown, "
-    "Name, Father's Name, and Date of Birth. Prioritize the **precise recognition of handwritten Burmese script** "
-    "for fields like Name, Fathers_Name, Date_of_Birth, and NRC_township. "
-    "The NRC number must be broken down into four components: NRC_state_division (1-14, Latin digits), NRC_township (Burmese script), "
-    "NRC_sth (e.g., (N), Latin letters), and NRC_no (6 digits, Latin digits). "
-    "All numerical values must be output as standard Latin digits (0-9). "
-    "Crucially, you must provide an Overall_Confidence_Score (0.0 to 1.0) based on the image quality and legibility. "
+    "You are an expert Optical Character Recognition (OCR) and Intelligent Document Processing (IDP) system "
+    "specialized in high-accuracy extraction from Myanmar National Registration Card (NRC) documents. "
+    
+    "**PRIMARY DIRECTIVE:** Focus solely on extracting the four NRC components, Name, Father's Name, and Date of Birth. "
+    "**PRIORITIZE ACCURACY** for handwritten Burmese script fields over all other requirements. "
+
+    "**BURMESE OCR CONTEXT AND CONSTRAINTS:**\n"
+    "1.  **NRC Format:** The full NRC is structured as [NRC_state_division]/[NRC_township]([NRC_sth])[NRC_no]. \n"
+    "    * `NRC_state_division`: Must be Latin digits (1-14). \n"
+    "    * `NRC_township`: **Must** be extracted in the original, often handwritten, Burmese script. It is always located between the '/' and the '('.\n"
+    "    * `NRC_sth`: Must be Latin letters inside parentheses, e.g., (N), (C), or (A).\n"
+    "    * `NRC_no`: Must be six Latin digits (0-9).\n"
+    "2.  **Script Consistency:** Name, Father's Name, and Date of Birth must be rendered exactly as seen in the image, preserving the handwritten Burmese characters (including Burmese numbers if present in DOB).\n"
+    "3.  **Output:** All numerical data for scores and the NRC number (state/division, 6-digit number) must be standard Latin digits (0-9).\n"
+    
     "Output the results ONLY as a JSON object conforming to the provided schema."
 )
 
@@ -149,15 +155,18 @@ def is_valid_date(burmese_date_str: str) -> bool:
     """Tries to parse a date from the Burmese string and validates it."""
     today = date.today()
     import re
+    # Look for a 4-digit number (representing the year)
     year_match = re.search(r'(\d{4})', burmese_date_str)
     if year_match:
         try:
             year = int(year_match.group(1))
+            # Basic plausibility checks
             if year > today.year: return False
-            if today.year - year > 200: return False
+            if today.year - year > 150: return False # Max age 150 years
             return True
         except ValueError:
             return False
+    # If no Latin year found, we assume it's entirely in Burmese script and cannot validate the year easily
     return True 
 
 def validate_nrc_data(data: Dict[str, Any]) -> List[str]:
@@ -182,17 +191,18 @@ def validate_nrc_data(data: Dict[str, Any]) -> List[str]:
     
     # 3. Validate NRC Status (sth)
     nrc_sth = str(data.get('NRC_sth', '')).strip()
+    # Check if it looks like (A), (C), or (N) including parentheses
     if nrc_sth and not (nrc_sth.startswith('(') and nrc_sth.endswith(')') and len(nrc_sth) >= 3):
         warnings.append(f"NRC Classification Code ('NRC_sth') '{nrc_sth}' should be formatted as (C), (N), or (A) and include parentheses.")
 
     # 4. Validate Date of Birth
     dob_burmese = data.get('Date_of_Birth', '').strip()
     if dob_burmese and not is_valid_date(dob_burmese):
-        warnings.append(f"Date of Birth '{dob_burmese}' appears invalid (e.g., future date or over 200 years old).")
+        warnings.append(f"Date of Birth '{dob_burmese}' appears suspicious (e.g., future date or over 150 years old, based on Latin digits if found).")
         
     return warnings
 
-# --- Accuracy Score (UPDATED: Core Fields Only) ---
+# --- Accuracy Score (Core Fields Only) ---
 def calculate_accuracy_score(original_data: Dict[str, Any], corrected_data: Dict[str, Any]) -> float:
     """
     Calculates a field-level string similarity score between the model's output and the human-corrected output.
@@ -208,11 +218,12 @@ def calculate_accuracy_score(original_data: Dict[str, Any], corrected_data: Dict
         original_value = str(original_data.get(field, "")).strip()
         corrected_value = str(corrected_data.get(field, "")).strip()
         
+        # Calculate similarity only if at least one value is present
         if original_value or corrected_value:
             similarity_ratio = difflib.SequenceMatcher(None, original_value, corrected_value).ratio()
             total_score += similarity_ratio
         else:
-            total_score += 1.0 
+            total_score += 1.0 # Perfect match if both are empty
             
     accuracy = total_score / len(fields_to_compare)
     return accuracy
@@ -245,13 +256,13 @@ def update_data_from_fields(fields_data: Dict[str, str]):
 def extract_nrc_data(enhanced_image_bytes: bytes) -> Optional[Dict[str, Any]]:
     """
     Calls the Gemini API to extract structured data from the ENHANCED image bytes,
-    relying on holistic understanding of the document structure.
+    relying on holistic understanding of the document structure and contextual guidance.
     """
     if not API_KEY or not API_URL:
         st.error("API Key or URL is missing. Please configure them.")
         return None
         
-    st.info("Sending **oriented and enhanced** document to Gemini API for extraction. The model will use structural context to find the fields.")
+    st.info("Sending **oriented and enhanced** document to Gemini API with **contextual rules** for high-accuracy extraction.")
     
     base64_image = base64.b64encode(enhanced_image_bytes).decode('utf-8')
     mime_type = "image/jpeg" 
@@ -260,12 +271,7 @@ def extract_nrc_data(enhanced_image_bytes: bytes) -> Optional[Dict[str, Any]]:
     user_query = (
         "Analyze the provided Myanmar NRC document image. Extract the values for ONLY the core identity fields: "
         "the four NRC components, Name, Father's Name, and Date of Birth. "
-        "Crucially, split the NRC number (X/XXX(Y)######) into its four requested components: "
-        "1. NRC_state_division (X, Latin digits 1-14) "
-        "2. NRC_township (XXX, Burmese words between '/' and '(', in original Burmese script) "
-        "3. NRC_sth ((Y), the classification code including parentheses, e.g., (N), (C), or (A)) "
-        "4. NRC_no (######, the 6-digit number, Latin digits) "
-        "Ensure Name, Father's Name, and Date of Birth are copied exactly as written in the original handwritten Burmese script. "
+        "Adhere strictly to the Burmese OCR Context and Constraints provided in the System Instruction. "
         "Return the output as a single JSON object."
     )
     
@@ -345,14 +351,14 @@ def rotate_uploaded_image(angle: int):
         st.error(f"Error during manual rotation: {e}")
 
 
-# --- Streamlit App UI (UPDATED FOR CORE FIELDS) ---
+# --- Streamlit App UI (Core Fields Only) ---
 
 def main():
-    st.set_page_config(page_title="NRC Document Data Extractor V7", layout="centered")
+    st.set_page_config(page_title="NRC Document Data Extractor V8", layout="centered")
 
-    st.title("🇲🇲 NRC Document Data Extractor V7")
-    st.subheader("Focused Extraction: Core Identity Fields Only")
-    st.markdown("This version focuses solely on the **NRC number breakdown (4 parts), Name, Father's Name, and Date of Birth** for maximum accuracy on critical data.")
+    st.title("🇲🇲 NRC Document Data Extractor V8")
+    st.subheader("Contextualized Extraction for Maximum Burmese OCR Accuracy")
+    st.markdown("This version provides the AI with detailed structural rules to enhance accuracy on the handwritten core identity fields.")
 
     # Initialize session state for data storage
     if 'extracted_data' not in st.session_state: st.session_state['extracted_data'] = None
@@ -507,22 +513,22 @@ def main():
                 st.download_button(
                     label="⬇️ Download Final JSON",
                     data=json_output,
-                    file_name="nrc_data_corrected_v7.json",
+                    file_name="nrc_data_corrected_v8.json",
                     mime="application/json",
                 )
             with col_dl2:
                 st.download_button(
                     label="⬇️ Download Final CSV",
                     data=csv_output,
-                    file_name="nrc_data_corrected_v7.csv",
+                    file_name="nrc_data_corrected_v8.csv",
                     mime="text/csv",
                 )
 
             st.markdown("---")
 
-            # 4. Human-in-the-Loop Correction (Text Fields) (MOVED DOWN & SIMPLIFIED)
+            # 4. Human-in-the-Loop Correction (Text Fields)
             st.subheader("✍️ 4. Correct Data & Recalculate Accuracy")
-            st.markdown("Review and correct any errors below. **Only core fields are shown.** Any change will be used to calculate the model's accuracy.")
+            st.markdown("Review and correct any errors below. Any change will be used to calculate the model's accuracy.")
             
             # --- Text Input Fields for Correction ---
             with st.form("correction_form"):
