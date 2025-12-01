@@ -7,7 +7,7 @@ import os
 from typing import Dict, Any, List, Optional
 import difflib 
 from datetime import date
-from PIL import Image, ImageEnhance # Import PIL for image enhancement
+from PIL import Image, ImageEnhance, ExifTags # Import PIL components
 
 # --- Configuration for Gemini API ---
 # The code now loads the API key securely using Streamlit's secrets management.
@@ -23,8 +23,22 @@ except KeyError:
 # The URL for the Gemini API model endpoint
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
 
-# --- Data Mapping and Schemas (REFINED) ---
-# Emphasizing required output format for the model
+# --- Hardcoded Normalized Bounding Boxes (0-1000) ---
+# Coordinates are estimated based on a typical NRC layout and assume a CORRECTLY ORIENTED image.
+NRC_BOUNDING_BOXES = {
+    # Normalized coordinates [xMin, yMin, xMax, yMax] based on a 1000x1000 grid
+    "NRC_State_Code": [190, 200, 290, 260],
+    "NRC_Number": [300, 200, 950, 290],
+    "Name": [280, 360, 950, 440],            # Handwritten Field
+    "Fathers_Name": [280, 450, 950, 530],    # Handwritten Field
+    "Date_of_Birth": [280, 530, 700, 610],   # Handwritten Field
+    "Height": [280, 610, 550, 690],
+    "Religion": [280, 690, 700, 770],
+    "Blood_Type": [280, 770, 550, 850],
+}
+
+
+# --- Data Mapping and Schemas (Unchanged) ---
 JSON_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -79,31 +93,77 @@ SYSTEM_INSTRUCTION = (
     "Output the results ONLY as a JSON object conforming to the provided schema."
 )
 
-# --- NEW: Image Enhancement Function ---
-
-def enhance_image(image_bytes: bytes) -> bytes:
+# --- NEW: Rotation Correction Function ---
+def rotate_image_from_exif(img: Image.Image) -> Image.Image:
     """
-    Applies sharpening and contrast enhancement to the image for better OCR reading.
+    Reads EXIF data to automatically correct image orientation.
+    """
+    try:
+        exif = img._getexif()
+        if exif is not None:
+            # Find the Orientation tag ID (usually 274)
+            orientation_tag = next((k for k, v in ExifTags.TAGS.items() if v == 'Orientation'), None)
+            
+            orientation = exif.get(orientation_tag)
+            
+            # Apply corresponding rotation
+            if orientation == 3:
+                img = img.rotate(180, expand=True)
+                st.info("Auto-rotated image 180° based on EXIF data.")
+            elif orientation == 6:
+                img = img.rotate(-90, expand=True) # Rotate 90 degrees CCW
+                st.info("Auto-rotated image -90° based on EXIF data.")
+            elif orientation == 8:
+                img = img.rotate(90, expand=True) # Rotate 90 degrees CW
+                st.info("Auto-rotated image 90° based on EXIF data.")
+    except Exception:
+        # Ignore if EXIF data is missing or corrupted
+        pass
+    
+    return img
+
+def image_to_bytes(img: Image.Image) -> bytes:
+    """Converts a PIL Image object back to JPEG bytes."""
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=90)
+    return buffer.getvalue()
+
+
+# --- Image Pre-Processing Pipeline ---
+
+def process_image(image_bytes: bytes, rotation_angle: int = 0) -> bytes:
+    """
+    Applies auto-rotation, manual rotation, sharpening, and contrast enhancement.
     """
     try:
         # Load the image
         img = Image.open(io.BytesIO(image_bytes))
+
+        # 1. Auto-Rotate from EXIF data (Done first to set correct baseline)
+        img = rotate_image_from_exif(img)
         
-        # 1. Sharpen the image (Factor of 2.0 is usually aggressive but good for OCR)
+        # 2. Apply Manual Rotation (if triggered by user buttons)
+        if rotation_angle != 0:
+            img = img.rotate(rotation_angle, expand=True)
+            st.info(f"Manually rotated image by {rotation_angle}°.")
+
+        # 3. Sharpen the image (Factor of 2.0)
         sharpen_filter = ImageEnhance.Sharpness(img)
         img_sharpened = sharpen_filter.enhance(2.0)
         
-        # 2. Increase contrast (Factor of 1.5)
+        # 4. Increase contrast (Factor of 1.5)
         contrast_filter = ImageEnhance.Contrast(img_sharpened)
         img_final = contrast_filter.enhance(1.5)
         
-        # Save the enhanced image back to bytes (use JPEG for efficiency)
-        buffer = io.BytesIO()
-        img_final.save(buffer, format="JPEG", quality=90) 
-        return buffer.getvalue()
+        # 5. Convert back to bytes and store the PIL object for later use
+        final_bytes = image_to_bytes(img_final)
+
+        # Store the manually rotated PIL image in session state for re-runs
+        st.session_state['current_image_bytes'] = image_to_bytes(img)
+        
+        return final_bytes
     except Exception as e:
-        # Fallback to original image if enhancement fails
-        st.warning(f"Image enhancement failed: {e}. Using original image.")
+        st.warning(f"Image processing pipeline failed: {e}. Using original image bytes.")
         return image_bytes
 
 # --- Validation and Utility Functions (Unchanged) ---
@@ -179,33 +239,46 @@ def calculate_accuracy_score(original_data: Dict[str, Any], corrected_data: Dict
     accuracy = total_score / len(fields_to_compare)
     return accuracy
 
-# --- Function to call the Gemini API (MODIFIED) ---
+# --- Function to call the Gemini API ---
 @st.cache_data(show_spinner=False)
-def extract_nrc_data(image_bytes: bytes) -> Optional[Dict[str, Any]]:
+def extract_nrc_data(enhanced_image_bytes: bytes) -> Optional[Dict[str, Any]]:
     """
-    Calls the Gemini API to extract structured data from the ENHANCED image bytes.
+    Calls the Gemini API to extract structured data from the ENHANCED image bytes,
+    using segmented extraction based on normalized coordinates.
     """
     if not API_KEY or not API_URL:
         st.error("API Key or URL is missing. Please configure them.")
         return None
         
-    # --- NEW: Image Enhancement Step ---
-    enhanced_image_bytes = enhance_image(image_bytes)
-    
-    st.info("Sending **enhanced** document to Gemini API for extraction. This may take a moment...")
+    st.info("Sending **segmented, oriented, and enhanced** document to Gemini API for precise extraction. This may take a moment...")
     
     base64_image = base64.b64encode(enhanced_image_bytes).decode('utf-8')
-    mime_type = "image/jpeg" # Use JPEG as that is the format output by the enhancement function
+    mime_type = "image/jpeg" 
     
-    # --- REFINED USER QUERY ---
-    user_query = (
-        "Analyze the provided Myanmar NRC document image. Locate and extract all fields. "
-        "The **NRC State Code** must be a number between 1 and 14 (output as a standard digit). "
-        "The **NRC Full Number** must be the complete string, including the State Code, Township Code, "
-        "classification in parentheses (C, N, or A), and the 6-digit citizen number, following the pattern: X/XXX(Y)######. "
-        "Ensure the Name, Father's Name, and Date of Birth are captured precisely from the **handwriting**. "
-        "Return the output as a single JSON object."
-    )
+    # --- CONSTRUCT SEGMENTED USER QUERY ---
+    prompt_segments = [
+        "Analyze the provided Myanmar NRC document image. Extract data for the fields listed below.",
+        "The coordinates are normalized to a 1000x1000 grid [xMin, yMin, xMax, yMax].",
+        "For each field, only read the text within the specified bounding box. Ignore all other content and background.\n"
+    ]
+    
+    # Add a specific instruction for each field using the bounding box
+    for field_name, coords in NRC_BOUNDING_BOXES.items():
+        # Convert 0-1000 coordinates to 0.0-1.0 format for better AI interpretation
+        normalized_coords = [c / 1000.0 for c in coords]
+        
+        instruction = f"- Field: **{field_name}** at: **[{normalized_coords[0]:.3f}, {normalized_coords[1]:.3f}, {normalized_coords[2]:.3f}, {normalized_coords[3]:.3f}]**."
+        
+        if field_name in ["Name", "Fathers_Name", "Date_of_Birth"]:
+            instruction += " **MUST be extracted from handwritten Burmese script.**"
+        elif field_name == "NRC_State_Code":
+            instruction += " Output as a standard Latin digit (1-14)."
+        
+        prompt_segments.append(instruction)
+
+    # Final query assembly
+    user_query = "\n".join(prompt_segments)
+    user_query += "\n\nReturn the output as a single JSON object."
     
     payload = {
         "contents": [
@@ -241,7 +314,6 @@ def extract_nrc_data(image_bytes: bytes) -> Optional[Dict[str, Any]]:
             extracted_data = json.loads(json_string)
             
             st.session_state['original_data'] = extracted_data.copy()
-            st.session_state['enhanced_image_bytes'] = enhanced_image_bytes # Store enhanced image
             
             # Run Validation
             warnings = validate_nrc_data(extracted_data)
@@ -299,21 +371,53 @@ def update_data_from_fields(fields_data: Dict[str, str]):
     except Exception as e:
         st.error(f"An unexpected error occurred during update: {e}")
 
+# --- Rotation Action Functions ---
+def rotate_uploaded_image(angle: int):
+    """
+    Applies manual rotation to the original uploaded image bytes and stores them.
+    """
+    if 'uploaded_file_bytes' not in st.session_state or st.session_state['uploaded_file_bytes'] is None:
+        st.error("Please upload an image first.")
+        return
+        
+    try:
+        # Load the image from the latest bytes (which might already be rotated)
+        img_bytes = st.session_state.get('current_image_bytes') or st.session_state['uploaded_file_bytes']
+        img = Image.open(io.BytesIO(img_bytes))
+        
+        # Apply rotation
+        img_rotated = img.rotate(angle, expand=True)
+        
+        # Save the new bytes back to session state for re-runs
+        st.session_state['uploaded_file_bytes'] = image_to_bytes(img_rotated)
+        st.session_state['current_image_bytes'] = image_to_bytes(img_rotated)
 
-# --- Streamlit App UI (MODIFIED for Image Tabs) ---
+        # Clear old extraction results
+        st.session_state['extracted_data'] = None 
+        st.session_state['accuracy_score'] = None
+        st.session_state['enhanced_image_bytes'] = None 
+        
+        st.rerun() # Rerun to update the display
+    except Exception as e:
+        st.error(f"Error during manual rotation: {e}")
+
+
+# --- Streamlit App UI ---
 
 def main():
-    st.set_page_config(page_title="NRC Document Data Extractor V2", layout="centered")
+    st.set_page_config(page_title="NRC Document Data Extractor V4", layout="centered")
 
-    st.title("🇲🇲 NRC Document Data Extractor V2")
-    st.subheader("Step 1: Focus on Image Quality and Handwriting Recognition")
-    st.markdown("We are now using **sharpening and contrast enhancement** before sending the image to the AI, and using a **more focused prompt** to improve handwritten text accuracy.")
+    st.title("🇲🇲 NRC Document Data Extractor V4")
+    st.subheader("Step 3: Robustness (Auto-Rotation, Segmentation, and Enhancement)")
+    st.markdown("This version automatically corrects the image orientation via **EXIF data** to ensure the bounding boxes are accurate. Use the rotation buttons if the image is still crooked.")
 
     # Initialize session state for data storage
     if 'extracted_data' not in st.session_state: st.session_state['extracted_data'] = None
     if 'original_data' not in st.session_state: st.session_state['original_data'] = None
     if 'accuracy_score' not in st.session_state: st.session_state['accuracy_score'] = None
     if 'enhanced_image_bytes' not in st.session_state: st.session_state['enhanced_image_bytes'] = None
+    if 'uploaded_file_bytes' not in st.session_state: st.session_state['uploaded_file_bytes'] = None
+    if 'current_image_bytes' not in st.session_state: st.session_state['current_image_bytes'] = None
 
 
     # --- INPUT SELECTION ---
@@ -328,38 +432,71 @@ def main():
     with tab2:
         camera_image = st.camera_input("Snap a photo of the NRC Document")
     
-    selected_source = uploaded_file if uploaded_file is not None else camera_image
-
-    if selected_source is not None:
-        image_bytes = selected_source.getvalue()
+    # Determine the latest uploaded source
+    if uploaded_file is not None:
+        selected_source = uploaded_file
+        # Initialize or update session state with new upload
+        if st.session_state.get('uploaded_file_name') != uploaded_file.name:
+            st.session_state['uploaded_file_bytes'] = uploaded_file.getvalue()
+            st.session_state['uploaded_file_name'] = uploaded_file.name
+            st.session_state['current_image_bytes'] = uploaded_file.getvalue()
+    elif camera_image is not None:
+        selected_source = camera_image
+        # Always treat camera image as a new input
+        st.session_state['uploaded_file_bytes'] = camera_image.getvalue()
+        st.session_state['current_image_bytes'] = camera_image.getvalue()
         
-        # Display images in tabs for comparison
-        img_tab1, img_tab2 = st.tabs(["Original Image", "Enhanced (Pre-Processed) Image"])
+    
+    if st.session_state.get('uploaded_file_bytes'):
+        image_bytes_to_display = st.session_state['current_image_bytes']
+        
+        # --- Rotation Controls ---
+        st.subheader("0. Correct Orientation (If needed)")
+        col_rot1, col_rot2, col_rot3, col_rot4 = st.columns([1, 1, 1, 3])
+        with col_rot1:
+            st.button("Rotate ↺ -90°", on_click=rotate_uploaded_image, args=(90,), help="Rotate Counter-Clockwise 90°")
+        with col_rot2:
+            st.button("Rotate ↻ +90°", on_click=rotate_uploaded_image, args=(-90,), help="Rotate Clockwise 90°")
+        with col_rot3:
+            st.button("Rotate 180°", on_click=rotate_uploaded_image, args=(180,), help="Rotate 180°")
+        with col_rot4:
+            st.info("The image below shows the *current* orientation.")
 
+        # --- Image Display Tabs ---
+        img_tab1, img_tab2 = st.tabs(["Current Oriented Image", "AI Processed Image (Enhanced)"])
+        
         with img_tab1:
-            st.image(image_bytes, caption='Original Input Document', use_column_width=True)
+            # Display the current, oriented but unenhanced image
+            st.image(image_bytes_to_display, caption='Current Input Document (Auto-rotated via EXIF if metadata was present)', use_column_width=True)
 
         with img_tab2:
+            # Display the final, enhanced image that goes to the AI
             if 'enhanced_image_bytes' in st.session_state and st.session_state['enhanced_image_bytes'] is not None:
                 st.image(st.session_state['enhanced_image_bytes'], caption='Sharpened & Contrast Enhanced Image Sent to AI', use_column_width=True)
             else:
-                st.info("The enhanced image preview will appear here after extraction.")
+                st.info("The AI processed image preview will appear here after extraction.")
 
         st.divider()
 
         # Button to trigger extraction
-        if st.button("1. Extract & Validate Data (Using Enhanced Image)", type="primary"):
-            # Clear previous results before new extraction
+        if st.button("1. Extract & Validate Data (Using Segmented Prompt)", type="primary"):
+            # The extraction uses the currently oriented image bytes
+            
+            # 1. Clear previous results (except for the current image bytes)
             st.session_state['extracted_data'] = None 
             st.session_state['accuracy_score'] = None
-            st.session_state['enhanced_image_bytes'] = None 
             
-            # This call now handles the enhancement internally
-            extracted_data = extract_nrc_data(image_bytes)
+            with st.spinner("Processing image (Auto-Rotation, Enhancement) and calling Gemini..."):
+                # 2. Run the image through the pipeline for enhancement
+                enhanced_bytes = process_image(st.session_state['uploaded_file_bytes'])
+                st.session_state['enhanced_image_bytes'] = enhanced_bytes
+                
+                # 3. Perform the extraction
+                extracted_data = extract_nrc_data(enhanced_bytes)
             
             if extracted_data:
                 st.session_state['extracted_data'] = extracted_data
-                st.session_state['accuracy_score'] = 1.0 
+                st.session_state['accuracy_score'] = 1.0 # Reset accuracy for new run
                 st.rerun() 
                 
         # --- Display Results, Validation, and Correction ---
@@ -516,7 +653,7 @@ def main():
 
 
     else:
-        st.info("Please upload an image file or take a photo and click '1. Extract & Validate Data' to begin. Check the 'Enhanced Image' tab after extraction to see the image sent to the AI.")
+        st.info("Please upload an image file or take a photo and click '1. Extract & Validate Data' to begin. Use the rotation tools if your image is not upright.")
 
 if __name__ == "__main__":
     main()
