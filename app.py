@@ -80,7 +80,7 @@ SYSTEM_INSTRUCTION = (
     "You are an expert Optical Character Recognition (OCR) and Intelligent Document "
     "Processing (IDP) system specialized in reading Myanmar National Registration Card (NRC) documents. "
     "Your primary task is to **meticulously and accurately** extract the required fields, prioritizing the **precise recognition "
-    "of handwritten Burmese script** for fields like Name, Fathers_Name, Date_of_Birth, and NRC_township. "
+    "of handwritten Burmese script** for fields like Name(အမည်), Fathers_Name(အဘအမည်), Date_of_Birt(မွေးသက္ကရာဇ်)h, and NRC_township. "
     "The NRC number must be broken down into four components: NRC_state_division (1-14, burmese digits), NRC_township (Burmese script), "
     "NRC_sth (e.g., (N), burmese scripts), and NRC_no (6 digits, burmese digits). "
     "All numerical values must be output as standard burmese digits (၀-၉). "
@@ -270,10 +270,10 @@ def extract_nrc_data(enhanced_image_bytes: bytes) -> Optional[Dict[str, Any]]:
     user_query = (
         "Analyze the provided Myanmar NRC document image. Extract the values for the following fields. "
         "Crucially, split the NRC number (X/XXX(Y)######) into its four requested components: "
-        "1. NRC_state_division (X, Latin digits 1-14) "
+        "1. NRC_state_division (X, burmese digits 1-14) "
         "2. NRC_township (XXX, Burmese words between '/' and '(', in original Burmese script) "
         "3. NRC_sth ((Y), the classification code including parentheses, e.g., (N), (C), or (A)) "
-        "4. NRC_no (######, the 6-digit number, Latin digits) "
+        "4. NRC_no (######, the 6-digit number, burmese digits) "
         "Ensure Name, Father's Name, and Date of Birth are copied exactly as written in the original handwritten Burmese script. "
         "Return the output as a single JSON object."
     )
