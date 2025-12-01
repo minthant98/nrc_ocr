@@ -23,7 +23,7 @@ except KeyError:
 # The URL for the Gemini API model endpoint
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
 
-# --- Data Mapping and Schemas (Unchanged) ---
+# --- Data Mapping and Schemas (UPDATED) ---
 JSON_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -31,13 +31,21 @@ JSON_SCHEMA = {
             "type": "NUMBER",
             "description": "A score from 0.0 to 1.0 indicating the model's certainty in the entire extraction, especially for handwritten Burmese fields. Use 0.0 to 1.0 format."
         },
-        "NRC_State_Code": {
+        "NRC_state_division": {
             "type": "STRING",
-            "description": "The State/Division code (the first 1-2 digits/characters of the NRC), e.g., '1', '7', '12', translated into **standard Latin digits (1-14)**."
+            "description": "The State/Division code (the first 1-2 digits/characters of the NRC, 1-14), extracted as **standard Latin digits**."
         },
-        "NRC_Number": {
+        "NRC_township": {
             "type": "STRING",
-            "description": "The complete NRC number, including codes and the 6-digit number, following the pattern: X/XXX(Y)######. Must use standard characters."
+            "description": "The Township Code/initials, the Burmese words between '/' and '('. Extracted **precisely** in the original Burmese script."
+        },
+        "NRC_sth": {
+            "type": "STRING",
+            "description": "The classification code, the letters inside the parenthesis, e.g., '(N)', '(C)', or '(A)'. Must use standard Latin letters and include parentheses."
+        },
+        "NRC_no": {
+            "type": "STRING",
+            "description": "The six-digit citizen identification number, extracted as **standard Latin digits**."
         },
         "Name": {
             "type": "STRING",
@@ -64,23 +72,24 @@ JSON_SCHEMA = {
             "description": "The cardholder's blood type (သွေးအမျိုးအစား), including the Rh factor, if available."
         }
     },
-    "required": ["Overall_Confidence_Score", "NRC_State_Code", "NRC_Number", "Name", "Fathers_Name", "Date_of_Birth"] 
+    "required": ["Overall_Confidence_Score", "NRC_state_division", "NRC_township", "NRC_sth", "NRC_no", "Name", "Fathers_Name", "Date_of_Birth"] 
 }
 
-# --- SYSTEM INSTRUCTION (Slightly improved to be more direct) ---
+# --- SYSTEM INSTRUCTION (UPDATED) ---
 SYSTEM_INSTRUCTION = (
     "You are an expert Optical Character Recognition (OCR) and Intelligent Document "
     "Processing (IDP) system specialized in reading Myanmar National Registration Card (NRC) documents. "
     "Your primary task is to **meticulously and accurately** extract the required fields, prioritizing the **precise recognition "
-    "of handwritten Burmese script** by scanning the entire document contextually. "
-    "For handwritten fields, you must ignore the underlying pre-printed text/patterns and focus solely on the script written with a pen. "
-    "All numerical values (like the State Code) must be output as standard Latin digits (0-9). "
-    "Crucially, you must provide an Overall_Confidence_Score (0.0 to 1.0) based on the image quality and legibility of the handwritten fields. "
+    "of handwritten Burmese script** for fields like Name, Fathers_Name, Date_of_Birth, and NRC_township. "
+    "The NRC number must be broken down into four components: NRC_state_division (1-14, burmese digits), NRC_township (Burmese script), "
+    "NRC_sth (e.g., (N), burmese scripts), and NRC_no (6 digits, burmese digits). "
+    "All numerical values must be output as standard burmese digits (၀-၉). "
+    "Crucially, you must provide an Overall_Confidence_Score (0.0 to 1.0) based on the image quality and legibility. "
     "Output the results ONLY as a JSON object conforming to the provided schema."
 )
 
 
-# --- Image Pre-Processing Pipeline (Retained from V4 for robustness) ---
+# --- Image Pre-Processing Pipeline (Unchanged) ---
 
 def rotate_image_from_exif(img: Image.Image) -> Image.Image:
     """
@@ -146,7 +155,7 @@ def process_image(image_bytes: bytes, rotation_angle: int = 0) -> bytes:
         st.warning(f"Image processing pipeline failed: {e}. Using original image bytes.")
         return image_bytes
 
-# --- Validation and Utility Functions ---
+# --- Validation and Utility Functions (UPDATED) ---
 def is_valid_date(burmese_date_str: str) -> bool:
     """Tries to parse a date from the Burmese string and validates it."""
     today = date.today()
@@ -166,22 +175,28 @@ def validate_nrc_data(data: Dict[str, Any]) -> List[str]:
     """Applies the specified business rules to the extracted NRC data."""
     warnings = []
     
-    nrc_state_code = str(data.get('NRC_State_Code', '')).strip()
+    # 1. Validate NRC State/Division Code
+    nrc_state_code = str(data.get('NRC_state_division', '')).strip()
     if nrc_state_code:
         try:
             code = int(nrc_state_code)
             if not (1 <= code <= 14):
-                warnings.append(f"State Code '{nrc_state_code}' is outside the valid range (1-14).")
+                warnings.append(f"State/Division Code '{nrc_state_code}' is outside the valid range (1-14).")
         except ValueError:
-            warnings.append(f"State Code '{nrc_state_code}' is not a valid number (1-14).")
-    else: warnings.append("NRC State Code is missing.")
-        
-    nrc_number_full = data.get('NRC_Number', '').strip()
-    import re
-    citizen_number_match = re.search(r'\([CNA]\)\d{6}$', nrc_number_full)
-    if not citizen_number_match:
-        warnings.append(f"NRC Number '{nrc_number_full}' may be missing the classification code or the 6-digit citizen number.")
-        
+            warnings.append(f"State/Division Code '{nrc_state_code}' is not a valid number (1-14).")
+    else: warnings.append("NRC State/Division Code is missing.")
+    
+    # 2. Validate NRC 6-digit Number
+    nrc_no = str(data.get('NRC_no', '')).strip()
+    if not (nrc_no.isdigit() and len(nrc_no) == 6):
+        warnings.append(f"NRC 6-digit number '{nrc_no}' is invalid. It must contain exactly 6 Latin digits.")
+    
+    # 3. Validate NRC Status (sth)
+    nrc_sth = str(data.get('NRC_sth', '')).strip()
+    if nrc_sth and not (nrc_sth.startswith('(') and nrc_sth.endswith(')') and len(nrc_sth) >= 3):
+        warnings.append(f"NRC Classification Code ('NRC_sth') '{nrc_sth}' should be formatted as (C), (N), or (A) and include parentheses.")
+
+    # 4. Validate Date of Birth
     dob_burmese = data.get('Date_of_Birth', '').strip()
     if dob_burmese and not is_valid_date(dob_burmese):
         warnings.append(f"Date of Birth '{dob_burmese}' appears invalid (e.g., future date or over 200 years old).")
@@ -191,10 +206,11 @@ def validate_nrc_data(data: Dict[str, Any]) -> List[str]:
 def calculate_accuracy_score(original_data: Dict[str, Any], corrected_data: Dict[str, Any]) -> float:
     """
     Calculates a field-level string similarity score between the model's output and the human-corrected output.
+    (UPDATED to use new NRC fields)
     """
     fields_to_compare = [
-        "NRC_State_Code", "NRC_Number", "Name", "Fathers_Name", 
-        "Date_of_Birth", "Height", "Religion", "Blood_Type"
+        "NRC_state_division", "NRC_township", "NRC_sth", "NRC_no", 
+        "Name", "Fathers_Name", "Date_of_Birth", "Height", "Religion", "Blood_Type"
     ]
     total_score = 0.0
     
@@ -234,12 +250,12 @@ def update_data_from_fields(fields_data: Dict[str, str]):
     
     st.success("Data successfully updated, re-validated, and accuracy score recalculated.")
 
-# --- Function to call the Gemini API (Simplified Prompt) ---
+# --- Function to call the Gemini API ---
 @st.cache_data(show_spinner=False)
 def extract_nrc_data(enhanced_image_bytes: bytes) -> Optional[Dict[str, Any]]:
     """
     Calls the Gemini API to extract structured data from the ENHANCED image bytes,
-    relying on holistic understanding of the document structure (V3 prompt style).
+    relying on holistic understanding of the document structure.
     """
     if not API_KEY or not API_URL:
         st.error("API Key or URL is missing. Please configure them.")
@@ -250,11 +266,15 @@ def extract_nrc_data(enhanced_image_bytes: bytes) -> Optional[Dict[str, Any]]:
     base64_image = base64.b64encode(enhanced_image_bytes).decode('utf-8')
     mime_type = "image/jpeg" 
     
-    # --- CONSTRUCT HOLISTIC USER QUERY (V3 style) ---
+    # --- CONSTRUCT HOLISTIC USER QUERY (Emphasizing the new breakdown) ---
     user_query = (
         "Analyze the provided Myanmar NRC document image. Extract the values for the following fields. "
-        "Pay special attention to the handwritten Burmese text, ensuring the output for NRC_number, Name, Father's Name, and Date of Birth "
-        "is copied exactly as written in the original Burmese script from the document. "
+        "Crucially, split the NRC number (X/XXX(Y)######) into its four requested components: "
+        "1. NRC_state_division (X, Latin digits 1-14) "
+        "2. NRC_township (XXX, Burmese words between '/' and '(', in original Burmese script) "
+        "3. NRC_sth ((Y), the classification code including parentheses, e.g., (N), (C), or (A)) "
+        "4. NRC_no (######, the 6-digit number, Latin digits) "
+        "Ensure Name, Father's Name, and Date of Birth are copied exactly as written in the original handwritten Burmese script. "
         "Return the output as a single JSON object."
     )
     
@@ -303,7 +323,7 @@ def extract_nrc_data(enhanced_image_bytes: bytes) -> Optional[Dict[str, Any]]:
         return None
 
 
-# --- Rotation Action Functions ---
+# --- Rotation Action Functions (Unchanged) ---
 def rotate_uploaded_image(angle: int):
     """
     Applies manual rotation to the original uploaded image bytes and stores them.
@@ -334,14 +354,14 @@ def rotate_uploaded_image(angle: int):
         st.error(f"Error during manual rotation: {e}")
 
 
-# --- Streamlit App UI ---
+# --- Streamlit App UI (UPDATED FOR ORDER) ---
 
 def main():
-    st.set_page_config(page_title="NRC Document Data Extractor V5", layout="centered")
+    st.set_page_config(page_title="NRC Document Data Extractor V6", layout="centered")
 
-    st.title("🇲🇲 NRC Document Data Extractor V5")
-    st.subheader("Step 3: Optimal Hybrid Extraction (Orientation + Enhancement + Context)")
-    st.markdown("We are now using the most accurate approach: **Auto-Orientation** and **Image Enhancement** (V4's best features), combined with the **Holistic Contextual Prompting** (V3's best feature) for the final extraction.")
+    st.title("🇲🇲 NRC Document Data Extractor V6")
+    st.subheader("Granular Extraction: NRC Number Split into 4 Parts")
+    st.markdown("The NRC number is now split into its components: **State/Division**, **Township Code (Burmese)**, **Classification Code (N/C/A)**, and **6-Digit Number**.")
 
     # Initialize session state for data storage
     if 'extracted_data' not in st.session_state: st.session_state['extracted_data'] = None
@@ -353,12 +373,12 @@ def main():
     if 'uploaded_file_name' not in st.session_state: st.session_state['uploaded_file_name'] = None
 
 
-    # --- INPUT SELECTION (FIXED) ---
+    # --- INPUT SELECTION ---
     tab1, tab2 = st.tabs(["🖼️ Upload Image", "📸 Take Photo"])
 
     uploaded_file = None
     
-    # Process file/camera input using local variables (Fixes StreamlitAPIException)
+    # Process file/camera input using local variables 
     with tab1:
         uploaded_file_widget = st.file_uploader("Upload Myanmar NRC Image", type=["png", "jpg", "jpeg"])
     with tab2:
@@ -454,7 +474,7 @@ def main():
                 )
 
             # 2. Validation Warnings
-            st.subheader("⚠️ Validation Warnings")
+            st.subheader("⚠️ 2. Validation Warnings")
             if warnings:
                 st.warning("The extracted data has the following potential errors:")
                 for warning in warnings:
@@ -464,8 +484,55 @@ def main():
             
             st.markdown("---")
 
-            # 3. Human-in-the-Loop Correction (Text Inputs)
-            st.subheader("2. Human-in-the-Loop Correction (Text Fields)")
+            # 3. Final Data Display and Download (MOVED UP)
+            final_data_view = [
+                ("Confidence Score", f"{data.get('Overall_Confidence_Score', 0.0) * 100:.0f}%"), 
+                ("Accuracy Score", f"{accuracy * 100:.2f}%"), 
+                ("NRC State/Division (X)", data.get("NRC_state_division", "N/A")),
+                ("NRC Township (XXX)", data.get("NRC_township", "N/A")),
+                ("NRC Classification ((Y))", data.get("NRC_sth", "N/A")),
+                ("NRC 6-Digit No (######)", data.get("NRC_no", "N/A")),
+                ("Name (အမည်)", data.get("Name", "N/A")),
+                ("Father's Name (အဘအမည်)", data.get("Fathers_Name", "N/A")),
+                ("Date of Birth (မွေးသက္ကရာဇ်)", data.get("Date_of_Birth", "N/A")),
+                ("Height (အရပ်)", data.get("Height", "N/A")),
+                ("Religion (ကိုးကွယ်သည့်ဘာသာ)", data.get("Religion", "N/A")),
+                ("Blood Type (သွေးအမျိုးအစား)", data.get("Blood_Type", "N/A"))
+            ]
+            st.subheader("✅ 3. Current Extracted Data Snapshot")
+            st.table(final_data_view)
+
+            # Download Button 
+            download_data = data.copy()
+            download_data.pop('validation_warnings', None)
+            download_data['OCR_Accuracy_Score'] = accuracy 
+            
+            json_output = json.dumps(download_data, indent=2)
+            
+            header = list(download_data.keys())
+            values = [str(download_data[k]) for k in header]
+            csv_output = ",".join(header) + "\n" + ",".join(values)
+
+            col_dl1, col_dl2 = st.columns(2)
+            with col_dl1:
+                st.download_button(
+                    label="⬇️ Download Final JSON",
+                    data=json_output,
+                    file_name="nrc_data_corrected_v6.json",
+                    mime="application/json",
+                )
+            with col_dl2:
+                st.download_button(
+                    label="⬇️ Download Final CSV",
+                    data=csv_output,
+                    file_name="nrc_data_corrected_v6.csv",
+                    mime="text/csv",
+                )
+
+            st.markdown("---")
+
+            # 4. Human-in-the-Loop Correction (Text Fields) (MOVED DOWN)
+            st.subheader("✍️ 4. Correct Data & Recalculate Accuracy")
             st.markdown("Review and correct any errors below. **Any change will be used to calculate the model's accuracy.**")
             
             # --- Text Input Fields for Correction ---
@@ -473,22 +540,39 @@ def main():
                 
                 current_data = st.session_state['extracted_data']
                 
-                # --- NRC Fields ---
-                col1, col2 = st.columns(2)
+                # --- Granular NRC Fields ---
+                st.markdown("### NRC Components (X/XXX(Y)######)")
+                col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    NRC_State_Code = st.text_input(
-                        "NRC State Code (1-14)",
-                        value=current_data.get('NRC_State_Code', ''),
-                        key='NRC_State_Code_input',
-                        help="e.g., 1, 7, 12 (Must be a number 1-14)"
+                    NRC_state_division = st.text_input(
+                        "State/Division Code (X)",
+                        value=current_data.get('NRC_state_division', ''),
+                        key='NRC_state_division_input',
+                        help="Must be a Latin digit 1-14."
                     )
                 with col2:
-                    NRC_Number = st.text_input(
-                        "NRC Full Number (အမှတ်)",
-                        value=current_data.get('NRC_Number', ''),
-                        key='NRC_Number_input',
-                        help="e.g., 1/KaMaNa(N)123456"
+                    NRC_township = st.text_input(
+                        "Township Code (XXX)",
+                        value=current_data.get('NRC_township', ''),
+                        key='NRC_township_input',
+                        help="Burmese script between '/' and '('."
                     )
+                with col3:
+                    NRC_sth = st.text_input(
+                        "Classification Code ((Y))",
+                        value=current_data.get('NRC_sth', ''),
+                        key='NRC_sth_input',
+                        help="e.g., (N), (C), or (A) including parentheses."
+                    )
+                with col4:
+                    NRC_no = st.text_input(
+                        "6-Digit Number (######)",
+                        value=current_data.get('NRC_no', ''),
+                        key='NRC_no_input',
+                        help="Must be exactly 6 Latin digits."
+                    )
+
+                st.markdown("---")
 
                 # --- Personal Details ---
                 Name = st.text_input(
@@ -511,12 +595,12 @@ def main():
                 )
 
                 # --- Optional Fields ---
-                col3, col4, col5 = st.columns(3)
-                with col3:
-                    Height = st.text_input("Height (အရပ်)", value=current_data.get('Height', ''), key='Height_input')
-                with col4:
-                    Religion = st.text_input("Religion (ကိုးကွယ်သည့်ဘာသာ)", value=current_data.get('Religion', ''), key='Religion_input')
+                col5, col6, col7 = st.columns(3)
                 with col5:
+                    Height = st.text_input("Height (အရပ်)", value=current_data.get('Height', ''), key='Height_input')
+                with col6:
+                    Religion = st.text_input("Religion (ကိုးကွယ်သည့်ဘာသာ)", value=current_data.get('Religion', ''), key='Religion_input')
+                with col7:
                     Blood_Type = st.text_input("Blood Type (သွေးအမျိုးအစား)", value=current_data.get('Blood_Type', ''), key='Blood_Type_input')
 
                 # Button to submit corrections
@@ -524,8 +608,10 @@ def main():
                 
                 if submitted:
                     fields_data = {
-                        "NRC_State_Code": NRC_State_Code,
-                        "NRC_Number": NRC_Number,
+                        "NRC_state_division": NRC_state_division,
+                        "NRC_township": NRC_township,
+                        "NRC_sth": NRC_sth,
+                        "NRC_no": NRC_no,
                         "Name": Name,
                         "Fathers_Name": Fathers_Name,
                         "Date_of_Birth": Date_of_Birth,
@@ -537,50 +623,6 @@ def main():
                     st.rerun()
             
             st.markdown("---")
-
-            # 4. Final Data Display and Download
-            final_data_view = [
-                ("Confidence Score", f"{data.get('Overall_Confidence_Score', 0.0) * 100:.0f}%"), 
-                ("Accuracy Score", f"{accuracy * 100:.2f}%"), 
-                ("NRC State Code", data.get("NRC_State_Code", "N/A")),
-                ("NRC Number (အမှတ်)", data.get("NRC_Number", "N/A")),
-                ("Name (အမည်)", data.get("Name", "N/A")),
-                ("Father's Name (အဘအမည်)", data.get("Fathers_Name", "N/A")),
-                ("Date of Birth (မွေးသက္ကရာဇ်)", data.get("Date_of_Birth", "N/A")),
-                ("Height (အရပ်)", data.get("Height", "N/A")),
-                ("Religion (ကိုးကွယ်သည့်ဘာသာ)", data.get("Religion", "N/A")),
-                ("Blood Type (သွေးအမျိုးအစား)", data.get("Blood_Type", "N/A"))
-            ]
-            st.subheader("3. Final Corrected Data")
-            st.table(final_data_view)
-            
-            # Download Button (Data remains the same structure)
-            download_data = data.copy()
-            download_data.pop('validation_warnings', None)
-            download_data['OCR_Accuracy_Score'] = accuracy 
-            
-            json_output = json.dumps(download_data, indent=2)
-            
-            header = list(download_data.keys())
-            values = [str(download_data[k]) for k in header]
-            csv_output = ",".join(header) + "\n" + ",".join(values)
-
-            col_dl1, col_dl2 = st.columns(2)
-            with col_dl1:
-                st.download_button(
-                    label="⬇️ Download Final JSON",
-                    data=json_output,
-                    file_name="nrc_data_corrected.json",
-                    mime="application/json",
-                )
-            with col_dl2:
-                st.download_button(
-                    label="⬇️ Download Final CSV",
-                    data=csv_output,
-                    file_name="nrc_data_corrected.csv",
-                    mime="text/csv",
-                )
-
 
     else:
         st.info("Please upload an image file or take a photo and click '1. Extract & Validate Data' to begin. Use the rotation tools if your image is not upright.")
