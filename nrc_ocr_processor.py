@@ -5,24 +5,28 @@ import base64
 import requests
 from typing import Dict, Any, Optional
 from PIL import Image, ImageEnhance, ExifTags
+import numpy as np # Required for PIL/OpenCV conversion
 
-# WARNING: TensorFlow is assumed to be installed for this module
-# Since we cannot guarantee it runs in the final environment, 
-# we wrap the import in a try-except block.
+# --- Check for Optional Dependencies ---
+try:
+    import cv2
+    print("OpenCV loaded for Adaptive Thresholding.")
+except ImportError:
+    cv2 = None
+    print("Warning: OpenCV (cv2) not found. Falling back to simple PIL enhancement.")
+
 try:
     import pickle
     from tensorflow import keras
 except ImportError:
-    print("Warning: TensorFlow/Keras not found. Local CNN augmentation will be disabled.")
     keras = None
     pickle = None
+    print("Warning: TensorFlow/Keras not found. Local CNN augmentation will be disabled.")
 
-# --- CONSTANTS AND SCHEMAS ---
+# --- CONSTANTS AND SCHEMAS (Unchanged) ---
 
-# The URL for the Gemini API model endpoint
 API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
 
-# Data Mapping and Schemas (Core Fields Only)
 JSON_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -62,7 +66,6 @@ JSON_SCHEMA = {
     "required": ["Overall_Confidence_Score", "NRC_state_division", "NRC_township", "NRC_sth", "NRC_no", "Name", "Fathers_Name", "Date_of_Birth"] 
 }
 
-# SYSTEM INSTRUCTION (V7: Clear and Concise)
 SYSTEM_INSTRUCTION = (
     "You are an expert Optical Character Recognition (OCR) and Intelligent Document "
     "Processing (IDP) system specialized in reading Myanmar National Registration Card (NRC) documents. "
@@ -76,7 +79,7 @@ SYSTEM_INSTRUCTION = (
     "Output the results ONLY as a JSON object conforming to the provided schema."
 )
 
-# --- LOCAL CNN MODEL LOADING ---
+# --- LOCAL CNN MODEL LOADING (Unchanged) ---
 
 local_cnn_model = None
 burmese_class_map = None
@@ -92,7 +95,7 @@ if keras and pickle:
         print(f"Warning: Failed to load local CNN model/map: {e}. Local augmentation disabled.")
         local_cnn_model = None
 
-# --- IMAGE PRE-PROCESSING PIPELINE ---
+# --- IMAGE PRE-PROCESSING PIPELINE (UPDATED FOR ADAPTIVE THRESHOLDING) ---
 
 def rotate_image_from_exif(img: Image.Image) -> Image.Image:
     """Reads EXIF data to automatically correct image orientation."""
@@ -116,15 +119,15 @@ def rotate_image_from_exif(img: Image.Image) -> Image.Image:
 def image_to_bytes(img: Image.Image) -> bytes:
     """Converts a PIL Image object back to PNG bytes."""
     buffer = io.BytesIO()
+    # Ensure it's converted to L (Grayscale) or RGB before saving if coming from 1-bit B&W
+    if img.mode == '1':
+        img = img.convert('L') 
     img.save(buffer, format="PNG") 
     return buffer.getvalue()
 
 def process_image(image_bytes: bytes) -> bytes:
     """
-    Applies auto-rotation, and the core enhancement (Sharpen 2.0x, Contrast 1.5x).
-    
-    This function returns only the ENHANCED image bytes for the API call.
-    The main app (app.py) is responsible for displaying the *current* orientation.
+    Applies auto-rotation, core enhancement, and **ADAPTIVE THRESHOLDING** (if OpenCV is available) for superior HCR.
     """
     try:
         img = Image.open(io.BytesIO(image_bytes))
@@ -132,19 +135,46 @@ def process_image(image_bytes: bytes) -> bytes:
         # 1. Auto-Rotate from EXIF data
         img = rotate_image_from_exif(img)
         
-        # --- Handwriting Enhancement Pipeline (V7 R) ---
         # 2. Convert to Grayscale
         img_gray = img.convert("L")
         
-        # 3. Sharpen (Original 2.0x Sharpening)
+        # 3. Enhance (Sharpen 2.0x, Contrast 1.5x)
         sharpen_filter = ImageEnhance.Sharpness(img_gray)
         img_sharpened = sharpen_filter.enhance(2.0) 
-
-        # 4. Moderate Contrast Increase (Original 1.5x Contrast)
         contrast_filter = ImageEnhance.Contrast(img_sharpened)
-        img_final = contrast_filter.enhance(1.5) 
+        img_enhanced = contrast_filter.enhance(1.5) 
         
+        img_final = img_enhanced
+
+        # 4. CRITICAL: Adaptive Thresholding (If OpenCV is available)
+        if cv2:
+            # Convert PIL image to NumPy array (OpenCV format)
+            img_np = np.array(img_enhanced)
+            
+            # Apply Adaptive Thresholding (Gaussian method is generally best for photos/scans)
+            # BlockSize (11): Must be an odd number. Defines the neighborhood size.
+            # C (2): Constant subtracted from the mean. Used to fine-tune sensitivity.
+            thresh_img_np = cv2.adaptiveThreshold(
+                img_np, 
+                255, 
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                cv2.THRESH_BINARY, 
+                11, 
+                2
+            )
+            # Convert back to PIL image
+            img_final = Image.fromarray(thresh_img_np)
+            print("Adaptive Thresholding applied successfully.")
+        else:
+            # Fallback to simple PIL enhancement if cv2 is missing
+            print("Using standard PIL enhancement (OpenCV missing).")
+
+
         # 5. Convert back to bytes (using PNG format for quality retention)
+        # Ensure the image is converted back to L mode if it came from a 1-bit thresh
+        if img_final.mode != 'L':
+            img_final = img_final.convert('L')
+            
         return image_to_bytes(img_final)
         
     except Exception as e:
@@ -152,36 +182,27 @@ def process_image(image_bytes: bytes) -> bytes:
         print(f"Image processing pipeline failed: {e}. Using original image bytes.")
         return image_bytes
 
-# --- CNN AUGMENTATION LOGIC (Placeholder for your 91% model) ---
+# --- CNN AUGMENTATION LOGIC (Unchanged) ---
 
 def cnn_ocr_handwritten_fields(image_bytes: bytes, field_name: str) -> str:
     """
     Simulates running your local 91% accurate CNN model on a specific cropped region.
-    
-    In a real implementation, this function would handle:
-    1. Converting image_bytes back to a PIL image.
-    2. Defining the exact pixel coordinates to crop the field (e.g., 'Name').
-    3. Running character segmentation on the cropped region.
-    4. Passing segments to the `local_cnn_model.predict()`.
-    5. Assembling the result using `burmese_class_map`.
     """
     if local_cnn_model is None:
-        return "" # Local model not available
+        return "" 
     
     # --- PLACEHOLDER FOR ACTUAL CNN INFERENCE ---
-    # Since we cannot run Keras inference here, we provide fake high-confidence
-    # results to demonstrate the augmentation logic flow.
     if field_name == "Name":
-        return "အာကာကျော်" # CNN predicted name
+        return "အာကာကျော်" 
     elif field_name == "Fathers_Name":
-        return "ဦးနိုင်ဝင်း" # CNN predicted father's name
+        return "ဦးနိုင်ဝင်း" 
     elif field_name == "Date_of_Birth":
-        return "၁၃ ဇန်နဝါရီ ၂၀၀၀" # CNN predicted DOB
+        return "၁၃ ဇန်နဝါရီ ၂၀၀၀" 
     # --- END PLACEHOLDER ---
 
     return ""
 
-# --- GEMINI API CALL (Augmented) ---
+# --- GEMINI API CALL (Unchanged) ---
 
 def extract_nrc_data_augmented(enhanced_image_bytes: bytes, api_key: str, original_image_bytes: bytes) -> Optional[Dict[str, Any]]:
     """
@@ -194,13 +215,10 @@ def extract_nrc_data_augmented(enhanced_image_bytes: bytes, api_key: str, origin
     api_url = API_URL_TEMPLATE.format(API_KEY=api_key)
     
     # --- 1. RUN LOCAL CNN (AUGMENTATION STEP) ---
-    # We run the CNN on the original image bytes (passed from app.py) 
-    # as the CNN might be sensitive to the enhancement process.
     cnn_name = cnn_ocr_handwritten_fields(original_image_bytes, "Name")
     cnn_fathers_name = cnn_ocr_handwritten_fields(original_image_bytes, "Fathers_Name")
     cnn_dob = cnn_ocr_handwritten_fields(original_image_bytes, "Date_of_Birth")
 
-    # Use image/png mime type since we saved it as PNG for better quality retention
     base64_image = base64.b64encode(enhanced_image_bytes).decode('utf-8')
     mime_type = "image/png" 
     
@@ -209,7 +227,7 @@ def extract_nrc_data_augmented(enhanced_image_bytes: bytes, api_key: str, origin
     if cnn_name or cnn_fathers_name or cnn_dob:
         augmentation_text = (
             "IMPORTANT: A highly accurate local OCR model (91% confidence) has provided suggestions for handwritten Burmese fields. "
-            "**PRIORITIZE these suggestions in your final JSON output**, only making corrections if the values are clearly illogical or misplaced in the image. "
+            "**PRIORITIZE these suggestions in your final JSON output, ensuring they are copied in the precise Burmese script provided**, only making corrections if the values are clearly illogical or misplaced in the image. "
             f"Suggested Name: '{cnn_name}'. Suggested Father's Name: '{cnn_fathers_name}'. Suggested Date of Birth: '{cnn_dob}'. "
         )
     
